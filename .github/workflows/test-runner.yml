@@ -1,0 +1,49 @@
+name: Test Xeon Runner
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-runner:
+    runs-on:
+      - self-hosted
+      - linux
+      - xeon
+      - recipe-validation
+
+    steps:
+      - name: Basic system info
+        run: |
+          echo "=== Hostname ==="
+          hostname
+
+          echo "=== Kernel ==="
+          uname -a
+
+          echo "=== CPU ==="
+          lscpu
+
+          echo "=== NUMA ==="
+          numactl -H || true
+
+          echo "=== Memory ==="
+          free -h
+
+      - name: Check tools
+        run: |
+          echo "Python:"
+          python3 --version
+
+          echo "Git:"
+          git --version
+
+          echo "Docker:"
+          docker --version || true
+
+          echo "Podman:"
+          podman --version || true
+
+      - name: Check CPU features
+        run: |
+          grep -m1 '^flags' /proc/cpuinfo | \
+            grep -oE 'amx_[a-z0-9_]+' | sort -u || true

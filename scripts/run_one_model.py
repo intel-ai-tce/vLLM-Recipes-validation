@@ -1,0 +1,620 @@
+#!/usr/bin/env python3
+"""Validate one Xeon 6 recipe in one official vLLM CPU container."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import time
+import urllib.request
+from pathlib import Path
+
+
+def utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def run(
+    cmd,
+    *,
+    cwd=None,
+    env=None,
+    stdout=None,
+    stderr=None,
+    timeout=None,
+    check=True,
+    capture_output=False,
+):
+    return subprocess.run(
+        cmd,
+        cwd=cwd,
+        env=env,
+        stdout=stdout,
+        stderr=stderr,
+        timeout=timeout,
+        check=check,
+        text=True,
+        capture_output=capture_output,
+    )
+
+
+def docker_container_running(name: str) -> bool:
+    try:
+        proc = run(
+            ["docker", "inspect", "--format", "{{.State.Running}}", name],
+            timeout=10,
+            capture_output=True,
+        )
+        return proc.stdout.strip().lower() == "true"
+    except Exception:
+        return False
+
+
+def docker_http_ok(name: str, url: str, timeout: int = 5) -> bool:
+    try:
+        run(
+            [
+                "docker",
+                "exec",
+                name,
+                "curl",
+                "-fsS",
+                "--max-time",
+                str(timeout),
+                url,
+            ],
+            timeout=timeout + 5,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def get_served_model_name(
+    name: str, base_url: str, requested_model: str, timeout: int = 5
+) -> str:
+    """Resolve the model name accepted by the running OpenAI API."""
+    proc = run(
+        [
+            "docker",
+            "exec",
+            name,
+            "curl",
+            "-fsS",
+            "--max-time",
+            str(timeout),
+            f"{base_url}/v1/models",
+        ],
+        timeout=timeout + 5,
+        capture_output=True,
+    )
+    payload = json.loads(proc.stdout)
+    model_ids = [
+        item.get("id")
+        for item in payload.get("data", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    ]
+    if not model_ids:
+        raise RuntimeError("/v1/models returned no model IDs")
+
+    if requested_model in model_ids:
+        return requested_model
+
+    requested_lower = requested_model.lower()
+    case_insensitive = [m for m in model_ids if m.lower() == requested_lower]
+    if len(case_insensitive) == 1:
+        return case_insensitive[0]
+
+    if len(model_ids) == 1:
+        return model_ids[0]
+
+    raise RuntimeError(
+        "unable to identify served model for "
+        f"{requested_model!r}; /v1/models returned {model_ids!r}"
+    )
+
+
+def wait_ready(name: str, base_url: str, timeout_sec: int) -> bool:
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        if not docker_container_running(name):
+            return False
+        if docker_http_ok(name, f"{base_url}/health"):
+            return True
+        time.sleep(5)
+    return False
+
+
+def save_docker_logs(name: str, output: Path) -> None:
+    try:
+        proc = run(
+            ["docker", "logs", name],
+            timeout=60,
+            capture_output=True,
+            check=False,
+        )
+        output.write_text((proc.stdout or "") + (proc.stderr or ""))
+    except Exception as exc:
+        output.write_text(f"Unable to collect docker logs: {exc}\n")
+
+
+def remove_container(name: str) -> None:
+    run(
+        ["docker", "rm", "-f", name],
+        timeout=60,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+
+
+def image_metadata(image: str) -> dict:
+    metadata = {"image": image}
+    try:
+        proc = run(
+            ["docker", "image", "inspect", image],
+            timeout=30,
+            capture_output=True,
+        )
+        inspected = json.loads(proc.stdout)[0]
+        metadata["image_id"] = inspected.get("Id")
+        metadata["repo_digests"] = inspected.get("RepoDigests", [])
+    except Exception as exc:
+        metadata["inspect_error"] = str(exc)
+    return metadata
+
+
+def load_json(path: Path):
+    with path.open() as f:
+        return json.load(f)
+
+
+def load_model_override(model: str) -> dict:
+    """Load an optional per-model validation override."""
+    path = Path(__file__).resolve().parents[1] / "config/model_overrides.json"
+    if not path.is_file():
+        return {}
+    data = load_json(path)
+    models = data.get("models", {})
+    if not isinstance(models, dict):
+        raise ValueError(f"invalid model overrides file: {path}")
+    override = models.get(model, {})
+    if not isinstance(override, dict):
+        raise ValueError(f"invalid override for {model!r}: expected an object")
+    return override
+
+
+def find_latest_json(directory: Path):
+    files = sorted(
+        directory.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True
+    )
+    return files[0] if files else None
+
+
+def extract_metrics(data):
+    # vllm bench serve output fields have evolved. Preserve the complete raw JSON
+    # and normalize the common metrics when present.
+    aliases = {
+        "completed": ["completed", "completed_requests", "num_completed_requests"],
+        "request_throughput": ["request_throughput", "request_throughput_rps"],
+        "output_throughput": ["output_throughput", "output_throughput_tps"],
+        "mean_ttft_ms": ["mean_ttft_ms", "mean_ttft"],
+        "median_ttft_ms": ["median_ttft_ms", "median_ttft"],
+        "mean_tpot_ms": ["mean_tpot_ms", "mean_tpot"],
+        "median_tpot_ms": ["median_tpot_ms", "median_tpot"],
+        "mean_e2el_ms": ["mean_e2el_ms", "mean_e2el", "mean_e2e_latency_ms"],
+    }
+    out = {}
+    for normalized, keys in aliases.items():
+        for key in keys:
+            if key in data:
+                out[normalized] = data[key]
+                break
+    return out
+
+
+def copy_candidates(work: Path, result_dir: Path) -> None:
+    for name in ("recipe.json", "config.yml", "env.sh"):
+        src = work / name
+        if src.exists():
+            shutil.copy2(src, result_dir / name)
+
+
+def write_result(path: Path, result: dict) -> None:
+    result["finished_at"] = utc_now()
+    path.write_text(json.dumps(result, indent=2) + "\n")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model", required=True)
+    ap.add_argument("--recipe-url", required=True)
+    ap.add_argument("--vllm-dir", required=True)
+    ap.add_argument("--image", required=True)
+    ap.add_argument("--recipes-base-url", default="https://recipes.vllm.ai")
+    ap.add_argument("--hf-home", required=True)
+    ap.add_argument("--work-root", required=True)
+    ap.add_argument("--result-root", required=True)
+    ap.add_argument("--hardware", default="xeon6")
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--port", type=int, default=8000)
+    ap.add_argument("--server-timeout", type=int, default=3600)
+    ap.add_argument("--bench-timeout", type=int, default=1800)
+    ap.add_argument("--input-len", type=int, default=128)
+    ap.add_argument("--output-len", type=int, default=128)
+    ap.add_argument("--num-prompts", type=int, default=5)
+    ap.add_argument("--max-concurrency", type=int, default=1)
+    ap.add_argument("--request-rate", default="inf")
+    args = ap.parse_args()
+
+    safe_name = args.model.replace("/", "__")
+    work = (Path(args.work_root) / safe_name).resolve()
+    result_dir = (Path(args.result_root) / safe_name).resolve()
+    recipes_dir = (Path(args.vllm_dir) / "tools/recipes").resolve()
+    hf_home = Path(args.hf_home).resolve()
+
+    if work.exists():
+        shutil.rmtree(work)
+    work.mkdir(parents=True)
+    result_dir.mkdir(parents=True, exist_ok=True)
+    hf_home.mkdir(parents=True, exist_ok=True)
+
+    result = {
+        "model": args.model,
+        "hardware": args.hardware,
+        "started_at": utc_now(),
+        "recipe_url": args.recipe_url,
+        "recipes_base_url": args.recipes_base_url,
+        "runtime": image_metadata(args.image),
+        "workload": {
+            "input_tokens": args.input_len,
+            "output_tokens": args.output_len,
+            "num_prompts": args.num_prompts,
+            "max_concurrency": args.max_concurrency,
+            "request_rate": args.request_rate,
+        },
+        "stages": {},
+        "status": "FAIL",
+    }
+    result_path = result_dir / "result.json"
+
+    # Save the live rendering next to the generated files for provenance. The
+    # actual generation path below intentionally uses serve_with_recipe.sh with
+    # --model/--hardware, matching the documented Getting Started flow.
+    recipe_path = work / "recipe.json"
+    try:
+        req = urllib.request.Request(
+            args.recipe_url,
+            headers={"User-Agent": "xeon-recipes-weekly-ci/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=60) as response:
+            recipe_path.write_bytes(response.read())
+        result["stages"]["recipe_fetch"] = "PASS"
+    except Exception as exc:
+        result["stages"]["recipe_fetch"] = "FAIL"
+        result["error"] = f"recipe_fetch: {exc}"
+        write_result(result_path, result)
+        return 1
+
+    if not recipes_dir.joinpath("serve_with_recipe.sh").is_file():
+        result["stages"]["conversion"] = "FAIL"
+        result["error"] = f"serve_with_recipe.sh not found under {recipes_dir}"
+        copy_candidates(work, result_dir)
+        write_result(result_path, result)
+        return 1
+
+    # Keep names short and deterministic while avoiding collisions with stale
+    # containers from another model.
+    model_hash = hashlib.sha1(args.model.encode()).hexdigest()[:12]
+    container = f"xeon-recipe-{model_hash}-{os.getpid()}"
+    base_url = f"http://{args.host}:{args.port}"
+    server_log_path = result_dir / "server.log"
+
+    docker_cmd = [
+        "docker",
+        "run",
+        "-d",
+        "--name",
+        container,
+        "--entrypoint",
+        "bash",
+        "--security-opt",
+        "seccomp=unconfined",
+        "--cap-add",
+        "SYS_NICE",
+        "--shm-size=4g",
+        "-v",
+        f"{recipes_dir}:/recipes:ro",
+        "-v",
+        f"{work}:/validation",
+        "-v",
+        f"{result_dir}:/results",
+        "-v",
+        f"{hf_home}:/hf-cache",
+        "-e",
+        "HF_HOME=/hf-cache",
+        "-e",
+        "HF_HUB_CACHE=/hf-cache/hub",
+        "-w",
+        "/validation",
+    ]
+
+    # Preserve credentials/network settings needed by corporate runners without
+    # writing secret values into the command line or result files.
+    inherited_env = (
+        "HF_TOKEN",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+    )
+    for name in inherited_env:
+        if os.environ.get(name):
+            docker_cmd.extend(["-e", name])
+
+    docker_cmd.extend(
+        [
+            args.image,
+            "-lc",
+            "exec /recipes/serve_with_recipe.sh "
+            f"--api-base {shell_quote(args.recipes_base_url)} "
+            f"--model {shell_quote(args.model)} "
+            f"--hardware {shell_quote(args.hardware)}",
+        ]
+    )
+
+    return_code = 1
+    started = False
+    try:
+        try:
+            run(docker_cmd, timeout=120, capture_output=True)
+            started = True
+            result["stages"]["container_start"] = "PASS"
+        except Exception as exc:
+            result["stages"]["container_start"] = "FAIL"
+            result["stages"]["conversion"] = "FAIL"
+            result["error"] = f"docker_run: {exc}"
+            return 1
+
+        start = time.monotonic()
+        ready = wait_ready(container, base_url, args.server_timeout)
+        result["startup_seconds"] = round(time.monotonic() - start, 3)
+
+        config_path = work / "config.yml"
+        env_path = work / "env.sh"
+        conversion_ok = config_path.is_file() and env_path.is_file()
+        result["stages"]["conversion"] = "PASS" if conversion_ok else "FAIL"
+        copy_candidates(work, result_dir)
+
+        if not ready:
+            result["stages"]["startup"] = "FAIL"
+            if not conversion_ok:
+                result["error"] = (
+                    "serve_with_recipe.sh exited before generating config.yml/env.sh"
+                )
+            else:
+                result["error"] = (
+                    "vLLM did not become healthy before timeout or container exited"
+                )
+            return 1
+
+        result["stages"]["startup"] = "PASS"
+        result["stages"]["health"] = (
+            "PASS"
+            if docker_http_ok(container, f"{base_url}/health")
+            else "FAIL"
+        )
+        result["stages"]["models_endpoint"] = (
+            "PASS"
+            if docker_http_ok(container, f"{base_url}/v1/models")
+            else "FAIL"
+        )
+
+        try:
+            served_model_name = get_served_model_name(
+                container, base_url, args.model
+            )
+            result["served_model_name"] = served_model_name
+            result["stages"]["served_model_resolution"] = "PASS"
+        except Exception as exc:
+            result["stages"]["served_model_resolution"] = "FAIL"
+            result["error"] = f"served_model_resolution: {exc}"
+            return 1
+
+        try:
+            version = run(
+                ["docker", "exec", container, "vllm", "--version"],
+                timeout=30,
+                capture_output=True,
+            ).stdout.strip()
+            result["runtime"]["vllm_version"] = version
+        except Exception as exc:
+            result["runtime"]["vllm_version_error"] = str(exc)
+
+        bench_dir = result_dir / "benchmark"
+        bench_dir.mkdir(exist_ok=True)
+        bench_log = result_dir / "benchmark.log"
+
+        model_override = load_model_override(args.model)
+        benchmark_override = model_override.get("benchmark", {})
+        if not isinstance(benchmark_override, dict):
+            raise ValueError(
+                f"invalid benchmark override for {args.model!r}: expected an object"
+            )
+
+        backend = benchmark_override.get("backend", "vllm")
+        endpoint = benchmark_override.get("endpoint", "/v1/completions")
+        dataset_name = benchmark_override.get("dataset_name", "random")
+        result["benchmark_profile"] = {
+            "backend": backend,
+            "endpoint": endpoint,
+            "dataset_name": dataset_name,
+        }
+
+        python_packages = benchmark_override.get("python_packages", [])
+        if not isinstance(python_packages, list) or not all(
+            isinstance(package, str) and package.strip()
+            for package in python_packages
+        ):
+            raise ValueError(
+                f"invalid python_packages for {args.model!r}: "
+                "expected a list of package names"
+            )
+
+        if python_packages:
+            dependency_log = result_dir / "benchmark-dependencies.log"
+            result["benchmark_profile"]["python_packages"] = python_packages
+            try:
+                with dependency_log.open("w") as log:
+                    run(
+                        [
+                            "docker",
+                            "exec",
+                            container,
+                            "uv",
+                            "pip",
+                            "install",
+                            "--python",
+                            "/opt/venv/bin/python",
+                            *python_packages,
+                        ],
+                        stdout=log,
+                        stderr=subprocess.STDOUT,
+                        timeout=600,
+                    )
+                result["stages"]["benchmark_dependencies"] = "PASS"
+            except Exception as exc:
+                result["stages"]["benchmark_dependencies"] = "FAIL"
+                result["error"] = f"benchmark_dependencies: {exc}"
+                return 1
+        else:
+            result["stages"]["benchmark_dependencies"] = "SKIP"
+
+        bench_cmd = [
+            "docker",
+            "exec",
+            container,
+            "vllm",
+            "bench",
+            "serve",
+            "--backend",
+            backend,
+            "--base-url",
+            base_url,
+            "--model",
+            args.model,
+            "--served-model-name",
+            served_model_name,
+            "--endpoint",
+            endpoint,
+            "--dataset-name",
+            dataset_name,
+            "--num-prompts",
+            str(args.num_prompts),
+            "--request-rate",
+            str(args.request_rate),
+            "--max-concurrency",
+            str(args.max_concurrency),
+            "--save-result",
+            "--save-detailed",
+            "--result-dir",
+            "/results/benchmark",
+        ]
+
+        if dataset_name == "random":
+            bench_cmd.extend(
+                [
+                    "--random-input-len",
+                    str(args.input_len),
+                    "--random-output-len",
+                    str(args.output_len),
+                    "--ignore-eos",
+                ]
+            )
+
+        dataset_path = benchmark_override.get("dataset_path")
+        if dataset_path:
+            bench_cmd.extend(["--dataset-path", str(dataset_path)])
+            result["benchmark_profile"]["dataset_path"] = dataset_path
+
+        hf_split = benchmark_override.get("hf_split")
+        if hf_split:
+            bench_cmd.extend(["--hf-split", str(hf_split)])
+            result["benchmark_profile"]["hf_split"] = hf_split
+
+        hf_subset = benchmark_override.get("hf_subset")
+        if hf_subset:
+            bench_cmd.extend(["--hf-subset", str(hf_subset)])
+            result["benchmark_profile"]["hf_subset"] = hf_subset
+
+        if benchmark_override.get("no_oversample"):
+            bench_cmd.append("--no-oversample")
+        if benchmark_override.get("no_stream"):
+            bench_cmd.append("--no-stream")
+
+        # ASR datasets use their own audio input duration rather than the text
+        # random-input-len setting. Reuse output-len as the transcription token
+        # cap so the quick validation remains bounded.
+        if backend == "openai-audio":
+            bench_cmd.extend(["--hf-output-len", str(args.output_len)])
+
+        # The benchmark initializes its own tokenizer, independently of the
+        # already-running server. Mirror the recipe-generated server setting
+        # when the model requires Hugging Face custom code (for example,
+        # microsoft/Phi-4-multimodal-instruct).
+        trust_remote_code = any(
+            line.startswith("trust-remote-code:")
+            and line.split(":", 1)[1].strip().lower() == "true"
+            for line in config_path.read_text().splitlines()
+        )
+        result["benchmark_trust_remote_code"] = trust_remote_code
+        if trust_remote_code:
+            bench_cmd.append("--trust-remote-code")
+        try:
+            with bench_log.open("w") as log:
+                run(
+                    bench_cmd,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    timeout=args.bench_timeout,
+                )
+            result["stages"]["benchmark"] = "PASS"
+            bench_json = find_latest_json(bench_dir)
+            if bench_json:
+                raw = load_json(bench_json)
+                result["benchmark_result_file"] = str(
+                    bench_json.relative_to(result_dir)
+                )
+                result["metrics"] = extract_metrics(raw)
+            result["status"] = "PASS"
+            return_code = 0
+        except Exception as exc:
+            result["stages"]["benchmark"] = "FAIL"
+            result["error"] = f"benchmark: {exc}"
+            return_code = 1
+        return return_code
+    finally:
+        if started:
+            save_docker_logs(container, server_log_path)
+            remove_container(container)
+        copy_candidates(work, result_dir)
+        write_result(result_path, result)
+
+
+def shell_quote(value: str) -> str:
+    import shlex
+
+    return shlex.quote(value)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

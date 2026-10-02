@@ -1,0 +1,227 @@
+name: Nightly Xeon 6 Recipe Validation
+
+on:
+  schedule:
+    # 08:00 UTC daily: ~1:00 AM Pacific during daylight saving time,
+    # and ~12:00 AM Pacific during standard time.
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "Optional exact model ID; leave empty to test all Xeon6 recipes"
+        required: false
+        default: ""
+      vllm_image:
+        description: "Official vLLM CPU image"
+        required: false
+        default: "vllm/vllm-openai-cpu:nightly"
+      recipe_api_base:
+        description: "Recipes API base URL (production or Vercel preview)"
+        required: false
+        default: "https://recipes.vllm.ai"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly-xeon6-recipes
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    # Change labels to match the Intel internal self-hosted runner registration.
+    runs-on: [self-hosted, linux, x64, xeon6, recipe-validation]
+    timeout-minutes: 10080 # 7 days; all-model validation may be long.
+
+    env:
+      # Optional repo variable. When unset, settings.env falls back to
+      # $HOME/.cache/huggingface on the self-hosted runner.
+      HF_HOME: ${{ vars.HF_HOME }}
+      # HF_TOKEN should be stored as an internal-repo/environment secret if gated
+      # models are part of the Xeon recipe catalog.
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      TEST_MODEL: ${{ inputs.model || '' }}
+      # Scheduled runs do not populate workflow_dispatch input defaults.
+      # Keep the nightly image as an explicit cron-safe fallback here.
+      VLLM_IMAGE: ${{ inputs.vllm_image || 'vllm/vllm-openai-cpu:nightly' }}
+      RECIPES_BASE_URL: ${{ inputs.recipe_api_base || 'https://recipes.vllm.ai' }}
+      # Keep nightly known-good state separate from the weekly/stable catalog.
+      VALIDATED_BRANCH: validated-xeon6-nightly
+      # Unique history key. Rerunning the same Actions run creates a new attempt.
+      VALIDATION_RUN_ID: nightly-run-${{ github.run_number }}-attempt-${{ github.run_attempt }}
+
+    steps:
+      - name: Checkout validation harness
+        uses: actions/checkout@v6
+
+      - name: Check Hugging Face configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=== Hugging Face configuration ==="
+
+          # HF_TOKEN is required because the Xeon recipe catalog may include
+          # gated models such as Meta Llama. Never print the secret value.
+          if [[ -z "${HF_TOKEN:-}" ]]; then
+            echo "::error::HF_TOKEN repository secret is not configured"
+            exit 1
+          fi
+          echo "HF_TOKEN: configured"
+
+          # Prefer the HF_HOME repository variable. If it is unset, resolve a
+          # persistent runner-local default and export it for all later steps.
+          if [[ -z "${HF_HOME:-}" ]]; then
+            RESOLVED_HF_HOME="${HOME}/.cache/huggingface"
+            echo "::warning::HF_HOME repository variable is not configured; using ${RESOLVED_HF_HOME}"
+          else
+            RESOLVED_HF_HOME="${HF_HOME}"
+          fi
+
+          if [[ "${RESOLVED_HF_HOME}" != /* ]]; then
+            echo "::error::HF_HOME must be an absolute path: ${RESOLVED_HF_HOME}"
+            exit 1
+          fi
+
+          mkdir -p "${RESOLVED_HF_HOME}"
+          TEST_FILE="${RESOLVED_HF_HOME}/.github-runner-write-test"
+          touch "${TEST_FILE}"
+          rm -f "${TEST_FILE}"
+
+          # Make the resolved value available to weekly.sh and later steps.
+          echo "HF_HOME=${RESOLVED_HF_HOME}" >> "${GITHUB_ENV}"
+
+          echo "HF_HOME: ${RESOLVED_HF_HOME}"
+          echo "HF_HOME is writable."
+          echo
+          echo "=== Hugging Face cache filesystem ==="
+          df -h "${RESOLVED_HF_HOME}"
+
+      - name: Restore last known-good validated catalog
+        run: ./scripts/hydrate_validated.sh
+
+      - name: Run Xeon 6 recipe tests
+        id: test
+        continue-on-error: true
+        run: ./scripts/weekly.sh
+
+      - name: Show validation summary
+        if: always()
+        shell: bash
+        run: |
+          python3 <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          summary_path = Path("results/weekly-summary.json")
+          out = Path(os.environ["GITHUB_STEP_SUMMARY"])
+
+          if not summary_path.exists():
+              out.write_text(
+                  "# Nightly Xeon 6 Recipe Validation\n\n"
+                  "The validation summary was not generated. Check the failed "
+                  "workflow step logs and uploaded artifacts.\n"
+              )
+              raise SystemExit(0)
+
+          data = json.loads(summary_path.read_text())
+          lines = [
+              "# Nightly Xeon 6 Recipe Validation",
+              "",
+              f"**Run:** `{data.get('run_id', 'unknown')}`  ",
+              f"**Generated:** `{data.get('generated_at', 'unknown')}`  ",
+              f"**vLLM commit:** `{data.get('vllm', {}).get('commit', 'unknown')}`",
+              "",
+              "| Tested | Passed | Failed |",
+              "| ---: | ---: | ---: |",
+              f"| {data.get('tested', 0)} | {data.get('passed', 0)} | {data.get('failed', 0)} |",
+              "",
+              "## Models",
+              "",
+              "| Model | Status | Convert | Startup | Benchmark | Mean TTFT ms | Mean TPOT ms | Output tok/s | Error |",
+              "| --- | --- | --- | --- | --- | ---: | ---: | ---: | --- |",
+          ]
+
+          for r in data.get("models", []):
+              status = str(r.get("status", "UNKNOWN"))
+              icon = "✅" if status == "PASS" else "❌"
+              stages = r.get("stages", {})
+              metrics = r.get("metrics", {})
+              error = str(r.get("error", "")).replace("|", "\\|").replace("\n", " ")
+              if len(error) > 180:
+                  error = error[:177] + "..."
+              lines.append(
+                  "| `{}` | {} {} | {} | {} | {} | {} | {} | {} | {} |".format(
+                      r.get("model", "unknown"),
+                      icon,
+                      status,
+                      stages.get("conversion", "-"),
+                      stages.get("startup", "-"),
+                      stages.get("benchmark", "-"),
+                      metrics.get("mean_ttft_ms", "-"),
+                      metrics.get("mean_tpot_ms", "-"),
+                      metrics.get("output_throughput", "-"),
+                      error or "-",
+                  )
+              )
+
+          run_date = data.get("run_date")
+          run_id = data.get("run_id")
+          if run_date and run_id:
+              branch_url = (
+                  f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/"
+                  f"{os.environ.get('GITHUB_REPOSITORY', '')}/tree/validated-xeon6-nightly/"
+                  f"history/{run_date}/{run_id}"
+              )
+              lines += [
+                  "",
+                  f"Historical run files: [{run_date}/{run_id}]({branch_url})",
+                  "",
+                  "The full HTML report and per-model logs are also included in the workflow artifact.",
+              ]
+
+          out.write_text("\n".join(lines) + "\n")
+          PY
+
+      - name: Upload nightly results
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: xeon6-nightly-${{ github.run_number }}
+          path: |
+            results/
+            history/**/${{ env.VALIDATION_RUN_ID }}/
+          retention-days: 90
+
+      - name: Upload latest validated bundles
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: xeon6-nightly-validated-${{ github.run_number }}
+          path: validated/
+          retention-days: 90
+
+      - name: Publish latest nightly known-good catalog
+        if: always()
+        run: ./scripts/publish_validated.sh
+
+      - name: Cleanup Docker disk usage
+        if: always()
+        shell: bash
+        run: |
+          echo "=== Docker disk usage before cleanup ==="
+          docker system df || true
+
+          # Test containers are normally removed by the validation harness.
+          # Prune leftovers from interrupted runs and dangling image layers,
+          # including superseded layers from moving tags such as :nightly.
+          docker container prune -f || true
+          docker image prune -f || true
+
+          echo "=== Docker disk usage after cleanup ==="
+          docker system df || true
+
+      - name: Fail job if any model failed
+        if: steps.test.outcome == 'failure'
+        run: exit 1
