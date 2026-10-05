@@ -14,7 +14,7 @@ same official Docker container instance for each model.
 
 1. Live Recipes catalog: `https://recipes.vllm.ai/models.json`
 2. Per-model Xeon 6 rendering: `/<model>/hw/xeon6.json`
-3. `vllm-project/vllm` checkout containing `tools/recipes/serve_with_recipe.sh`
+3. Image-bundled `tools/recipes/serve_with_recipe.sh` (optional GitHub override)
 4. Intel Xeon 6 self-hosted GitHub runner with Docker access
 5. Official CPU image: `vllm/vllm-openai-cpu:latest-x86_64` by default
 6. Optional `HF_TOKEN` and a persistent `HF_HOME` cache for gated models
@@ -34,7 +34,8 @@ midnight/1 AM across the year.
 
 Nightly validation publishes to `validated-xeon6-nightly`, keeping nightly
 runtime regressions separate from the weekly/stable `validated-xeon6` catalog.
-Manual dispatch can still override `model`, `vllm_image`, and `recipe_api_base`.
+Manual dispatch can override `model`, `vllm_image`, `recipe_api_base`,
+`recipe_tools_repo`, and `recipe_tools_ref`.
 
 ## Weekly flow
 
@@ -42,7 +43,7 @@ Manual dispatch can still override `model`, `vllm_image`, and `recipe_api_base`.
 flowchart TD
     A["GitHub Actions weekly cron<br/>or workflow_dispatch"] --> B["Intel Xeon 6 self-hosted runner"]
 
-    B --> C["Clone/update vllm-project/vllm"]
+    B --> C["Optional recipe tools checkout"]
     B --> D["Pull official CPU image<br/>vllm/vllm-openai-cpu:latest-x86_64"]
     B --> E["Discover every model with<br/>/hw/xeon6.json"]
 
@@ -53,8 +54,8 @@ flowchart TD
     subgraph F["For each Xeon 6 model - sequentially"]
         direction TB
 
-        F1["docker run ONE official CPU-image container<br/><br/>Mounts:<br/>tools/recipes → /recipes:ro<br/>HF cache → /hf-cache<br/>work/results → /validation"]
-        F2["/recipes/serve_with_recipe.sh<br/>--model MODEL<br/>--hardware xeon6"]
+        F1["docker run ONE official CPU-image container<br/><br/>Mounts:<br/>optional tools/recipes → /recipes:ro<br/>HF cache → /hf-cache<br/>work/results → /validation"]
+        F2["Image-bundled or override serve_with_recipe.sh<br/>--model MODEL<br/>--hardware xeon6"]
         F3["Automatic Xeon 6 hardware detection<br/>--detect-hardware"]
         F4["Generate config.yml + env.sh"]
         F5["source env.sh"]
@@ -76,9 +77,23 @@ flowchart TD
     I --> J["Publish validated-xeon6 branch<br/>validated/ + latest/ + history/"]
 ```
 
-The host checkout supplies only the upstream `tools/recipes` scripts through a
-read-only bind mount. The vLLM runtime and benchmark CLI come from the official
-container image.
+By default, Docker uses the bundled entrypoint
+`/vllm-workspace/tools/recipes/serve_with_recipe.sh`, following the
+[official CPU serving instructions](https://docs.vllm.ai/en/stable/getting_started/installation/cpu/#serve-with-vllm-recipes).
+No vLLM source checkout is needed. The writable `/validation` working directory
+captures generated `config.yml` and `env.sh` for the validation bundle.
+
+When `recipe_tools_repo` is supplied, the harness fetches `recipe_tools_ref` into
+a fresh checkout and mounts only `tools/recipes` at `/recipes:ro`, using
+`/recipes/serve_with_recipe.sh` as the entrypoint. The vLLM runtime and benchmark
+CLI still come from the selected image; this option tests recipe tool changes
+without rebuilding or installing vLLM. Changes elsewhere in that repository
+are not loaded into the runtime.
+
+`results/recipe-tools.json`, historical reports, and validated bundles record
+whether the tools came from the image or GitHub, the override repository/ref
+and resolved commit, and the image ID/digests. A bundled run has no separate
+tools commit; its provenance is the image ID/digests.
 
 ## Final outputs
 
@@ -103,6 +118,7 @@ A failed new run **does not overwrite** the last known-good bundle.
 results/
 ├── discovery.json
 ├── docker-image.json
+├── recipe-tools.json
 ├── system-info.txt
 ├── weekly-summary.json
 ├── weekly-summary.html
@@ -173,12 +189,23 @@ runner disk, set the repository variable `HF_HOME` to that path.
 
 ## Manual GitHub Actions test
 
-The workflow exposes three manual inputs:
+The weekly and nightly workflows expose these manual inputs:
 
 - `model`: exact model ID; leave empty for the full weekly catalog
 - `vllm_image`: defaults to `vllm/vllm-openai-cpu:latest-x86_64`
 - `recipe_api_base`: defaults to `https://recipes.vllm.ai`; set this to a
   Recipes Vercel preview URL to validate a Recipes PR before merge
+- `recipe_tools_repo`: optional GitHub clone URL, for example
+  `https://github.com/intel-ai-tce/vllm.git`; leave empty to use image-bundled tools
+- `recipe_tools_ref`: branch, tag, or full commit SHA; defaults to `main` and is
+  used only when `recipe_tools_repo` is set
+
+To test the TP detection branch, set `recipe_tools_repo` to
+`https://github.com/intel-ai-tce/vllm.git` and `recipe_tools_ref` to
+`recipe_tools_TP_fix`. Use the preview deployment in `recipe_api_base` to test
+recipe website changes together with those tools. A missing ref or missing
+`tools/recipes/serve_with_recipe.sh` fails the run rather than falling back to
+the image's scripts.
 
 For the first end-to-end test, trigger **Weekly Xeon 6 Recipe Validation** with
 one Xeon6 model. After that passes, leave `model` empty to exercise the same
@@ -214,6 +241,18 @@ RECIPES_BASE_URL=https://vllm-recipes-git-fork-intel-ai-tce-xeonvariantsfix-infe
 The same `RECIPES_BASE_URL` is used for model discovery and for
 `serve_with_recipe.sh --api-base`, so a preview run does not mix preview
 discovery with production recipe conversion.
+
+Test a recipe tools fork/branch with the official CPU image:
+
+```bash
+RECIPE_TOOLS_REPO=https://github.com/intel-ai-tce/vllm.git \
+RECIPE_TOOLS_REF=recipe_tools_TP_fix \
+TEST_MODEL=microsoft/Phi-4-reasoning \
+  ./scripts/weekly.sh
+```
+
+The previous `VLLM_REPO` / `VLLM_REF` environment variables are replaced by the
+optional `RECIPE_TOOLS_REPO` / `RECIPE_TOOLS_REF` pair.
 
 ## Benchmark policy
 

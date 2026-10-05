@@ -236,7 +236,10 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True)
     ap.add_argument("--recipe-url", required=True)
-    ap.add_argument("--vllm-dir", required=True)
+    ap.add_argument(
+        "--vllm-dir",
+        help="Optional checkout supplying tools/recipes; default: image-bundled tools",
+    )
     ap.add_argument("--image", required=True)
     ap.add_argument("--recipes-base-url", default="https://recipes.vllm.ai")
     ap.add_argument("--hf-home", required=True)
@@ -257,7 +260,9 @@ def main() -> int:
     safe_name = args.model.replace("/", "__")
     work = (Path(args.work_root) / safe_name).resolve()
     result_dir = (Path(args.result_root) / safe_name).resolve()
-    recipes_dir = (Path(args.vllm_dir) / "tools/recipes").resolve()
+    recipes_dir = (
+        (Path(args.vllm_dir) / "tools/recipes").resolve() if args.vllm_dir else None
+    )
     hf_home = Path(args.hf_home).resolve()
 
     if work.exists():
@@ -303,7 +308,10 @@ def main() -> int:
         write_result(result_path, result)
         return 1
 
-    if not recipes_dir.joinpath("serve_with_recipe.sh").is_file():
+    if (
+        recipes_dir is not None
+        and not recipes_dir.joinpath("serve_with_recipe.sh").is_file()
+    ):
         result["stages"]["conversion"] = "FAIL"
         result["error"] = f"serve_with_recipe.sh not found under {recipes_dir}"
         copy_candidates(work, result_dir)
@@ -324,14 +332,14 @@ def main() -> int:
         "--name",
         container,
         "--entrypoint",
-        "bash",
+        "/recipes/serve_with_recipe.sh"
+        if recipes_dir
+        else "/vllm-workspace/tools/recipes/serve_with_recipe.sh",
         "--security-opt",
         "seccomp=unconfined",
         "--cap-add",
         "SYS_NICE",
         "--shm-size=4g",
-        "-v",
-        f"{recipes_dir}:/recipes:ro",
         "-v",
         f"{work}:/validation",
         "-v",
@@ -345,6 +353,9 @@ def main() -> int:
         "-w",
         "/validation",
     ]
+
+    if recipes_dir is not None:
+        docker_cmd.extend(["-v", f"{recipes_dir}:/recipes:ro"])
 
     # Preserve credentials/network settings needed by corporate runners without
     # writing secret values into the command line or result files.
@@ -364,11 +375,12 @@ def main() -> int:
     docker_cmd.extend(
         [
             args.image,
-            "-lc",
-            "exec /recipes/serve_with_recipe.sh "
-            f"--api-base {shell_quote(args.recipes_base_url)} "
-            f"--model {shell_quote(args.model)} "
-            f"--hardware {shell_quote(args.hardware)}",
+            "--api-base",
+            args.recipes_base_url,
+            "--model",
+            args.model,
+            "--hardware",
+            args.hardware,
         ]
     )
 
@@ -608,12 +620,6 @@ def main() -> int:
             remove_container(container)
         copy_candidates(work, result_dir)
         write_result(result_path, result)
-
-
-def shell_quote(value: str) -> str:
-    import shlex
-
-    return shlex.quote(value)
 
 
 if __name__ == "__main__":

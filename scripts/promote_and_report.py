@@ -18,10 +18,10 @@ def main() -> int:
     ap.add_argument("--history", required=True)
     ap.add_argument("--run-id", required=True)
     ap.add_argument("--run-date", required=True)
-    ap.add_argument("--vllm-sha", default="unknown")
-    ap.add_argument("--vllm-ref", default="unknown")
+    ap.add_argument("--recipe-tools-metadata", required=True)
     args = ap.parse_args()
 
+    recipe_tools = json.loads(Path(args.recipe_tools_metadata).read_text())
     results_root = Path(args.results)
     validated_root = Path(args.validated)
     history_root = Path(args.history) / args.run_date / args.run_id
@@ -40,7 +40,7 @@ def main() -> int:
             shutil.rmtree(hist_dir)
         shutil.copytree(src_dir, hist_dir)
 
-        data["vllm"] = {"ref": args.vllm_ref, "commit": args.vllm_sha}
+        data["recipe_tools"] = recipe_tools
         data["run_id"] = args.run_id
         data["run_date"] = args.run_date
         (hist_dir / "result.json").write_text(json.dumps(data, indent=2) + "\n")
@@ -69,7 +69,7 @@ def main() -> int:
                 "run_id": args.run_id,
                 "run_date": args.run_date,
                 "hardware": data.get("hardware"),
-                "vllm": data["vllm"],
+                "recipe_tools": recipe_tools,
                 "recipe_url": data.get("recipe_url"),
                 "workload": data.get("workload"),
                 "stages": data.get("stages"),
@@ -83,7 +83,9 @@ def main() -> int:
                 f"# {model} — Xeon 6 validated configuration\n\n"
                 f"Last validated: {validation['validated_at']}\n\n"
                 f"Validation run: `{args.run_date}/{args.run_id}`\n\n"
-                f"vLLM tools commit: `{args.vllm_sha}`\n\n"
+                f"Recipe tools source: `{recipe_tools['source']}`\n\n"
+                f"Recipe tools repository: `{recipe_tools.get('repository') or 'image-bundled'}`\n\n"
+                f"Recipe tools ref / commit: `{recipe_tools.get('ref') or '-'} / {recipe_tools.get('commit') or '-'}`\n\n"
                 f"Validated runtime image: "
                 f"`{data.get('runtime', {}).get('image', 'unknown')}`\n\n"
                 "The weekly validation generated and served this configuration via "
@@ -102,7 +104,7 @@ def main() -> int:
         "run_id": args.run_id,
         "run_date": args.run_date,
         "history_path": f"history/{args.run_date}/{args.run_id}",
-        "vllm": {"ref": args.vllm_ref, "commit": args.vllm_sha},
+        "recipe_tools": recipe_tools,
         "tested": len(rows),
         "passed": sum(r.get("status") == "PASS" for r in rows),
         "failed": sum(r.get("status") != "PASS" for r in rows),
@@ -144,7 +146,9 @@ th{{background:#f6f8fa;position:sticky;top:0}}
 </style></head><body>
 <h1>Xeon 6 Recipe Validation</h1>
 <p>Run: <code>{html.escape(args.run_id)}</code> &nbsp; Date: <code>{html.escape(args.run_date)}</code><br>
-vLLM ref: <code>{html.escape(args.vllm_ref)}</code> &nbsp; commit: <code>{html.escape(args.vllm_sha)}</code><br>
+Recipe tools source: <code>{html.escape(recipe_tools["source"])}</code><br>
+Repository: <code>{html.escape(recipe_tools.get("repository") or "image-bundled")}</code><br>
+Ref / commit: <code>{html.escape(recipe_tools.get("ref") or "-")} / {html.escape(recipe_tools.get("commit") or "-")}</code><br>
 Generated: <code>{html.escape(generated_at)}</code></p>
 <div class='summary'>
 <div class='card'><strong>Tested</strong><br>{len(rows)}</div>

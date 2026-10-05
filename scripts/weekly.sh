@@ -20,20 +20,28 @@ fi
 echo "==> Pulling official vLLM CPU image: $VLLM_IMAGE"
 docker pull "$VLLM_IMAGE"
 
-VLLM_DIR="$WORK_ROOT/vllm"
-if [[ ! -d "$VLLM_DIR/.git" ]]; then
-  git clone "$VLLM_REPO" "$VLLM_DIR"
-fi
-git -C "$VLLM_DIR" fetch --tags origin
-git -C "$VLLM_DIR" checkout --detach "$VLLM_REF" || {
-  git -C "$VLLM_DIR" fetch origin "$VLLM_REF"
-  git -C "$VLLM_DIR" checkout --detach FETCH_HEAD
-}
-VLLM_SHA=$(git -C "$VLLM_DIR" rev-parse HEAD)
-
-if [[ ! -f "$VLLM_DIR/tools/recipes/serve_with_recipe.sh" ]]; then
-  echo "ERROR: $VLLM_DIR/tools/recipes/serve_with_recipe.sh not found" >&2
-  exit 2
+# A fresh checkout fetches the requested remote ref on every run, even on a
+# persistent runner or after switching forks. Only tools/recipes is mounted.
+TOOLS_ARGS=()
+TOOLS_DIR=""
+TOOLS_SHA=""
+if [[ -n "$RECIPE_TOOLS_REPO" ]]; then
+  TOOLS_DIR=$(mktemp -d "$WORK_ROOT/recipe-tools.XXXXXX")
+  trap 'rm -rf "$TOOLS_DIR"' EXIT
+  git -C "$TOOLS_DIR" init
+  git -C "$TOOLS_DIR" remote add origin "$RECIPE_TOOLS_REPO"
+  git -C "$TOOLS_DIR" fetch --depth 1 origin "$RECIPE_TOOLS_REF"
+  git -C "$TOOLS_DIR" checkout --detach FETCH_HEAD
+  TOOLS_SHA=$(git -C "$TOOLS_DIR" rev-parse HEAD)
+  if [[ ! -f "$TOOLS_DIR/tools/recipes/serve_with_recipe.sh" ]]; then
+    echo "ERROR: tools/recipes/serve_with_recipe.sh not found in requested source" >&2
+    exit 2
+  fi
+  TOOLS_ARGS+=(--vllm-dir "$TOOLS_DIR")
+else
+  echo "==> Using recipe tools bundled in $VLLM_IMAGE"
+  docker run --rm --entrypoint /usr/bin/test "$VLLM_IMAGE" \
+    -x /vllm-workspace/tools/recipes/serve_with_recipe.sh
 fi
 
 rm -rf "$RESULT_ROOT"
@@ -41,6 +49,24 @@ mkdir -p "$RESULT_ROOT"
 
 "$ROOT/scripts/collect_system_info.sh" "$RESULT_ROOT/system-info.txt"
 docker image inspect "$VLLM_IMAGE" > "$RESULT_ROOT/docker-image.json"
+
+python3 - "$RESULT_ROOT/recipe-tools.json" "$RECIPE_TOOLS_REPO" "$RECIPE_TOOLS_REF" "$TOOLS_SHA" "$VLLM_IMAGE" "$RESULT_ROOT/docker-image.json" <<'PYMETA'
+import json
+import sys
+from pathlib import Path
+
+out, repo, ref, sha, image, image_info = sys.argv[1:]
+info = json.loads(Path(image_info).read_text())[0]
+Path(out).write_text(json.dumps({
+    "source": "github" if repo else "image",
+    "repository": repo or None,
+    "ref": ref if repo else None,
+    "commit": sha or None,
+    "image": image,
+    "image_id": info.get("Id"),
+    "image_digests": info.get("RepoDigests", []),
+}, indent=2) + "\n")
+PYMETA
 
 python3 "$ROOT/scripts/discover_xeon6_models.py" \
   --base-url "$RECIPES_BASE_URL" \
@@ -59,7 +85,7 @@ fi
 set +e
 python3 "$ROOT/scripts/run_all.py" \
   --discovery "$RESULT_ROOT/discovery.json" \
-  --vllm-dir "$VLLM_DIR" \
+  "${TOOLS_ARGS[@]}" \
   --image "$VLLM_IMAGE" \
   --recipes-base-url "$RECIPES_BASE_URL" \
   --hf-home "$HF_HOME" \
@@ -89,27 +115,28 @@ python3 "$ROOT/scripts/promote_and_report.py" \
   --history "$ROOT/history" \
   --run-id "$RUN_ID" \
   --run-date "$RUN_DATE" \
-  --vllm-ref "$VLLM_REF" \
-  --vllm-sha "$VLLM_SHA"
+  --recipe-tools-metadata "$RESULT_ROOT/recipe-tools.json"
 
 cp "$RESULT_ROOT/discovery.json" "$HISTORY_DIR/discovery.json"
 cp "$RESULT_ROOT/system-info.txt" "$HISTORY_DIR/system-info.txt"
 cp "$RESULT_ROOT/docker-image.json" "$HISTORY_DIR/docker-image.json"
+cp "$RESULT_ROOT/recipe-tools.json" "$HISTORY_DIR/recipe-tools.json"
 cp "$RESULT_ROOT/models/weekly-summary.json" "$RESULT_ROOT/weekly-summary.json"
 cp "$RESULT_ROOT/models/weekly-summary.html" "$RESULT_ROOT/weekly-summary.html"
 
-python3 - "$RESULT_ROOT/run-metadata.json" "$RUN_DATE" "$RUN_ID" <<'PY'
+python3 - "$RESULT_ROOT/run-metadata.json" "$RUN_DATE" "$RUN_ID" "$RESULT_ROOT/recipe-tools.json" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-out, run_date, run_id = sys.argv[1:]
+out, run_date, run_id, tools_metadata = sys.argv[1:]
 Path(out).write_text(
     json.dumps(
         {
             "run_date": run_date,
             "run_id": run_id,
             "history_path": f"history/{run_date}/{run_id}",
+            "recipe_tools": json.loads(Path(tools_metadata).read_text()),
         },
         indent=2,
     )

@@ -14,7 +14,10 @@ from pathlib import Path
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--discovery", required=True)
-    ap.add_argument("--vllm-dir", required=True)
+    ap.add_argument(
+        "--vllm-dir",
+        help="Optional checkout supplying tools/recipes; default: image-bundled tools",
+    )
     ap.add_argument("--image", required=True)
     ap.add_argument("--recipes-base-url", default="https://recipes.vllm.ai")
     ap.add_argument("--hf-home", required=True)
@@ -57,8 +60,6 @@ def main() -> int:
             model,
             "--recipe-url",
             item["recipe_url"],
-            "--vllm-dir",
-            args.vllm_dir,
             "--image",
             args.image,
             "--recipes-base-url",
@@ -86,6 +87,8 @@ def main() -> int:
             "--bench-timeout",
             str(args.bench_timeout),
         ]
+        if args.vllm_dir:
+            cmd.extend(["--vllm-dir", args.vllm_dir])
         rc = subprocess.run(cmd, env=os.environ.copy()).returncode
         if rc:
             failures.append(model)
