@@ -21,6 +21,17 @@ same official Docker container instance for each model.
 
 No vLLM installation and no custom image build are required on the runner.
 
+Actions summaries also show the selected image, Recipes URL, additional
+container environment, benchmark prompt count, hostname, CPU model/identity,
+and topology. Environment input is intended for non-secret settings; use
+repository secrets for credentials. Results record override variable names.
+
+For a local run with the same environment input:
+
+```bash
+VLLM_TEST_ENV_VARS='VLLM_USE_V2_MODEL_RUNNER=1' ./scripts/weekly.sh
+```
+
 
 ## Nightly flow
 
@@ -35,7 +46,7 @@ midnight/1 AM across the year.
 Nightly validation publishes to `validated-xeon6-nightly`, keeping nightly
 runtime regressions separate from the weekly/stable `validated-xeon6` catalog.
 Manual dispatch can override `model`, `vllm_image`, `recipe_api_base`,
-`recipe_tools_repo`, and `recipe_tools_ref`.
+`recipe_tools_repo`, `recipe_tools_ref`, and `vllm_env_vars`.
 
 ## Weekly flow
 
@@ -61,7 +72,7 @@ flowchart TD
         F5["source env.sh"]
         F6["exec vllm serve<br/>--config config.yml"]
         F7{"/health ready?"}
-        F8["docker exec SAME container<br/>vllm bench serve<br/><br/>input=128 / output=128<br/>num-prompts=5<br/>max-concurrency=1<br/>request-rate=inf<br/>ignore-eos"]
+        F8["docker exec SAME container<br/>vllm bench serve<br/><br/>input=128 / output=128<br/>num-prompts=20 weekly / 5 nightly<br/>max-concurrency=1<br/>request-rate=inf<br/>ignore-eos"]
         F9{"Validation result"}
 
         F1 --> F2 --> F3 --> F4 --> F5 --> F6 --> F7
@@ -195,6 +206,11 @@ The weekly and nightly workflows expose these manual inputs:
 - `vllm_image`: defaults to `vllm/vllm-openai-cpu:latest-x86_64`
 - `recipe_api_base`: defaults to `https://recipes.vllm.ai`; set this to a
   Recipes Vercel preview URL to validate a Recipes PR before merge
+- `vllm_env_vars`: optional non-secret `KEY=VALUE` pairs, separated by spaces or
+  newlines, applied to every model container. For example:
+  `VLLM_USE_V2_MODEL_RUNNER=1 VLLM_USE_RUST_FRONTEND=1`. Quote values containing
+  spaces. Environment values defined by the recipe's generated `env.sh` may
+  replace matching container variables when the serving script sources it.
 - `recipe_tools_repo`: optional GitHub clone URL, for example
   `https://github.com/intel-ai-tce/vllm.git`; leave empty to use image-bundled tools
 - `recipe_tools_ref`: branch, tag, or full commit SHA; defaults to `main` and is
@@ -260,7 +276,7 @@ The default quick performance check is intentionally small:
 
 - random input length: 128
 - requested output length: 128
-- prompts: 5
+- prompts: 20 in the weekly workflow; 5 in nightly and local runs
 - maximum concurrency: 1
 - request rate: infinite (backpressured by max concurrency)
 - `--ignore-eos` enabled to keep generated lengths comparable

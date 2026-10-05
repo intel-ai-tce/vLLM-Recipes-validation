@@ -8,6 +8,8 @@ import datetime as dt
 import hashlib
 import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import time
@@ -41,6 +43,31 @@ def run(
         text=True,
         capture_output=capture_output,
     )
+
+
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def parse_container_env_overrides(raw: str) -> list[tuple[str, str]]:
+    """Parse optional run-wide KEY=VALUE entries for docker run."""
+    if not raw.strip():
+        return []
+
+    parsed: dict[str, str] = {}
+    for item in shlex.split(raw):
+        if "=" not in item:
+            raise ValueError(
+                "container environment override must use KEY=VALUE syntax: "
+                f"{item!r}"
+            )
+        name, value = item.split("=", 1)
+        if not _ENV_NAME_RE.fullmatch(name):
+            raise ValueError(
+                f"invalid container environment variable name: {name!r}"
+            )
+        parsed[name] = value
+
+    return list(parsed.items())
 
 
 def docker_container_running(name: str) -> bool:
@@ -325,6 +352,24 @@ def main() -> int:
     base_url = f"http://{args.host}:{args.port}"
     server_log_path = result_dir / "server.log"
 
+    try:
+        container_env_overrides = parse_container_env_overrides(
+            os.environ.get("VLLM_TEST_ENV_VARS", "")
+        )
+        result["stages"]["container_env"] = (
+            "PASS" if container_env_overrides else "SKIP"
+        )
+        # Record names only; values may be sensitive and are already represented
+        # in the workflow summary with basic masking for secret-like names.
+        result["runtime"]["container_env_override_names"] = [
+            name for name, _ in container_env_overrides
+        ]
+    except ValueError as exc:
+        result["stages"]["container_env"] = "FAIL"
+        result["error"] = f"container_env: {exc}"
+        write_result(result_path, result)
+        return 1
+
     docker_cmd = [
         "docker",
         "run",
@@ -371,6 +416,11 @@ def main() -> int:
     for name in inherited_env:
         if os.environ.get(name):
             docker_cmd.extend(["-e", name])
+
+    # Apply workflow-provided run-wide overrides to every model container.
+    # docker exec inherits these variables for the benchmark process as well.
+    for name, value in container_env_overrides:
+        docker_cmd.extend(["-e", f"{name}={value}"])
 
     docker_cmd.extend(
         [
