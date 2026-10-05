@@ -1,4 +1,4 @@
-name: Nightly Xeon 6 Recipe Validation
+name: Nightly Xeon Recipe Validation
 
 on:
   schedule:
@@ -30,7 +30,7 @@ concurrency:
 jobs:
   validate:
     # Change labels to match the Intel internal self-hosted runner registration.
-    runs-on: [self-hosted, linux, x64, xeon6, recipe-validation]
+    runs-on: [self-hosted, linux, x64, xeon4, recipe-validation]
     timeout-minutes: 10080 # 7 days; all-model validation may be long.
 
     env:
@@ -84,6 +84,13 @@ jobs:
           fi
 
           mkdir -p "${RESOLVED_HF_HOME}"
+
+          # Allow each self-hosted runner to map ~/.cache/huggingface to its
+          # own backing storage with a symbolic link. Resolve the real path
+          # before exporting HF_HOME so Docker bind-mounts the backing directory.
+          RESOLVED_HF_HOME="$(readlink -f "${RESOLVED_HF_HOME}")"
+          echo "Resolved HF_HOME: ${RESOLVED_HF_HOME}"
+
           TEST_FILE="${RESOLVED_HF_HOME}/.github-runner-write-test"
           touch "${TEST_FILE}"
           rm -f "${TEST_FILE}"
@@ -100,7 +107,7 @@ jobs:
       - name: Restore last known-good validated catalog
         run: ./scripts/hydrate_validated.sh
 
-      - name: Run Xeon 6 recipe tests
+      - name: Run Xeon recipe tests
         id: test
         continue-on-error: true
         run: ./scripts/weekly.sh
@@ -119,7 +126,7 @@ jobs:
 
           if not summary_path.exists():
               out.write_text(
-                  "# Nightly Xeon 6 Recipe Validation\n\n"
+                  "# Nightly Xeon Recipe Validation\n\n"
                   "The validation summary was not generated. Check the failed "
                   "workflow step logs and uploaded artifacts.\n"
               )
@@ -127,7 +134,7 @@ jobs:
 
           data = json.loads(summary_path.read_text())
           lines = [
-              "# Nightly Xeon 6 Recipe Validation",
+              "# Nightly Xeon Recipe Validation",
               "",
               f"**Run:** `{data.get('run_id', 'unknown')}`  ",
               f"**Generated:** `{data.get('generated_at', 'unknown')}`  ",

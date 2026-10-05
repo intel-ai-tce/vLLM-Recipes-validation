@@ -79,6 +79,13 @@ jobs:
           fi
 
           mkdir -p "${RESOLVED_HF_HOME}"
+
+          # Allow each self-hosted runner to map ~/.cache/huggingface to its
+          # own backing storage with a symbolic link. Resolve the real path
+          # before exporting HF_HOME so Docker bind-mounts the backing directory.
+          RESOLVED_HF_HOME="$(readlink -f "${RESOLVED_HF_HOME}")"
+          echo "Resolved HF_HOME: ${RESOLVED_HF_HOME}"
+
           TEST_FILE="${RESOLVED_HF_HOME}/.github-runner-write-test"
           touch "${TEST_FILE}"
           rm -f "${TEST_FILE}"
