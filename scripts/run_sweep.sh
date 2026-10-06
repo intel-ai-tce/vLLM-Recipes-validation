@@ -93,6 +93,8 @@ DOCKER_ENV=(
   -e "SWEEP_TTFT_SLA_MS=$TTFT_SLA_MS"
   -e "SWEEP_TPOT_SLA_MS=$TPOT_SLA_MS"
   -e "HF_HOME=/root/.cache/huggingface"
+  -e "HOST_UID=$(id -u)"
+  -e "HOST_GID=$(id -g)"
 )
 if [[ -n "${HF_TOKEN:-}" ]]; then
   DOCKER_ENV+=(-e "HF_TOKEN=$HF_TOKEN")
@@ -120,6 +122,10 @@ docker run --rm \
   "$VLLM_IMAGE" \
   -lc '
     set -euo pipefail
+
+    # /output is a bind mount into the GitHub Actions workspace. The container
+    # runs as root, so always restore ownership before the container exits.
+    trap '''chown -R "${HOST_UID}:${HOST_GID}" /output || true''' EXIT
 
     python3 /recipes/recipe_json_to_vllm_config.py \
       --model "$SWEEP_MODEL" \
