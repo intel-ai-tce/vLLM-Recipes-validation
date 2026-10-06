@@ -1,0 +1,315 @@
+name: Xeon 6 Recipe Sweep
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "Exact model ID to sweep (one model per run)"
+        required: true
+        type: string
+      sweep_stage:
+        description: "Sweep stage"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - parallel-layout
+          - concurrency
+          - scheduler
+      input_tokens:
+        description: "Fixed input token length"
+        required: true
+        default: "128"
+        type: string
+      output_tokens:
+        description: "Fixed output token length"
+        required: true
+        default: "128"
+        type: string
+      concurrency:
+        description: "Seed/representative concurrency"
+        required: true
+        default: "32"
+        type: string
+      ttft_sla_ms:
+        description: "P99 TTFT objective in milliseconds"
+        required: true
+        default: "3000"
+        type: string
+      tpot_sla_ms:
+        description: "P99 TPOT objective in milliseconds"
+        required: true
+        default: "100"
+        type: string
+      vllm_image:
+        description: "Official vLLM CPU image"
+        required: false
+        default: "vllm/vllm-openai-cpu:latest-x86_64"
+        type: string
+      recipe_api_base:
+        description: "Recipes API base URL (production or preview)"
+        required: false
+        default: "https://recipes.vllm.ai"
+        type: string
+      recipe_tools_ref:
+        description: "vLLM recipe tools branch, tag, or commit"
+        required: false
+        default: "recipes-staged-sweep-workflow"
+        type: string
+
+permissions:
+  contents: read
+
+# A sweep consumes the whole benchmark host. Queue dispatches instead of running
+# competing experiments on the same Xeon system.
+concurrency:
+  group: xeon6-recipe-sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: [self-hosted, linux, x64, xeon6, recipe-validation]
+    timeout-minutes: 10080
+
+    env:
+      HF_HOME: ${{ vars.HF_HOME }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      MODEL: ${{ inputs.model }}
+      SWEEP_STAGE: ${{ inputs.sweep_stage }}
+      INPUT_TOKENS: ${{ inputs.input_tokens }}
+      OUTPUT_TOKENS: ${{ inputs.output_tokens }}
+      CONCURRENCY: ${{ inputs.concurrency }}
+      TTFT_SLA_MS: ${{ inputs.ttft_sla_ms }}
+      TPOT_SLA_MS: ${{ inputs.tpot_sla_ms }}
+      VLLM_IMAGE: ${{ inputs.vllm_image }}
+      RECIPES_BASE_URL: ${{ inputs.recipe_api_base }}
+      RECIPE_TOOLS_REPO: https://github.com/intel-ai-tce/vllm.git
+      RECIPE_TOOLS_REF: ${{ inputs.recipe_tools_ref }}
+      HARDWARE: xeon6
+      WORK_ROOT: ${{ github.workspace }}/work/sweep
+      RESULT_ROOT: ${{ github.workspace }}/results/sweep
+
+    steps:
+      - name: Checkout validation harness
+        uses: actions/checkout@v6
+
+      - name: Check Hugging Face configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${HF_TOKEN:-}" ]]; then
+            echo "::error::HF_TOKEN repository secret is not configured"
+            exit 1
+          fi
+
+          if [[ -z "${HF_HOME:-}" ]]; then
+            RESOLVED_HF_HOME="${HOME}/.cache/huggingface"
+            echo "::warning::HF_HOME repository variable is not configured; using ${RESOLVED_HF_HOME}"
+          else
+            RESOLVED_HF_HOME="${HF_HOME}"
+          fi
+
+          if [[ "${RESOLVED_HF_HOME}" != /* ]]; then
+            echo "::error::HF_HOME must be an absolute path: ${RESOLVED_HF_HOME}"
+            exit 1
+          fi
+
+          mkdir -p "${RESOLVED_HF_HOME}"
+          RESOLVED_HF_HOME="$(readlink -f "${RESOLVED_HF_HOME}")"
+          touch "${RESOLVED_HF_HOME}/.github-runner-write-test"
+          rm -f "${RESOLVED_HF_HOME}/.github-runner-write-test"
+          echo "HF_HOME=${RESOLVED_HF_HOME}" >> "${GITHUB_ENV}"
+          echo "Resolved HF_HOME: ${RESOLVED_HF_HOME}"
+
+      - name: Run recipe sweep
+        id: sweep
+        continue-on-error: true
+        run: ./scripts/run_sweep.sh
+
+      - name: Show sweep summary
+        if: always()
+        shell: bash
+        run: |
+          python3 <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path("results/sweep")
+          sweep_dir = root / "sweep"
+          out = Path(os.environ["GITHUB_STEP_SUMMARY"])
+
+          def read_json(path):
+              if not path.is_file():
+                  return None
+              try:
+                  value = json.loads(path.read_text())
+              except Exception:
+                  return None
+              return value if isinstance(value, dict) else None
+
+          def md(value):
+              return str(value).replace("|", "\\|").replace("\n", " ")
+
+          def fmt(value, digits=1):
+              if isinstance(value, bool) or not isinstance(value, (int, float)):
+                  return "-"
+              return f"{value:.{digits}f}"
+
+          def fmt_int(value):
+              if isinstance(value, bool) or not isinstance(value, (int, float)):
+                  return "-"
+              return f"{value:.0f}"
+
+          def scheduler_value(value):
+              return "vLLM default" if value is None else value
+
+          def parse_lscpu(text):
+              marker = "===== lscpu ====="
+              if marker not in text:
+                  return {}
+              section = text.split(marker, 1)[1]
+              if "===== " in section:
+                  section = section.split("===== ", 1)[0]
+              fields = {}
+              for line in section.splitlines():
+                  if ":" in line:
+                      key, value = line.split(":", 1)
+                      fields[key.strip()] = value.strip()
+              return fields
+
+          metadata = read_json(root / "sweep-metadata.json") or {}
+          tools = read_json(root / "recipe-tools.json") or {}
+          system_text = (
+              (root / "system-info.txt").read_text(errors="replace")
+              if (root / "system-info.txt").is_file()
+              else ""
+          )
+          lscpu = parse_lscpu(system_text)
+          hostname = "unknown"
+          for line in system_text.splitlines():
+              if line.startswith("hostname="):
+                  hostname = line.split("=", 1)[1].strip() or "unknown"
+                  break
+
+          parallel = read_json(sweep_dir / "parallel-layout-recommendation.json")
+          concurrency = read_json(sweep_dir / "concurrency-recommendation.json")
+          scheduler = read_json(sweep_dir / "recommendation.json")
+
+          lines = [
+              "# Xeon 6 Recipe Sweep",
+              "",
+              f"**Run:** `{os.environ.get('GITHUB_RUN_NUMBER', 'unknown')}`  ",
+              f"**Generated:** `{metadata.get('generated_at', 'unknown')}`  ",
+              f"**Model:** `{md(metadata.get('model', os.environ.get('MODEL', 'unknown')))}`  ",
+              f"**Recipe tools source:** `{tools.get('source', 'unknown')}`  ",
+              f"**Recipe tools repository:** `{md(tools.get('repository', 'unknown'))}`  ",
+              f"**Recipe tools ref / commit:** `{md(tools.get('ref', '-'))}` / `{md(tools.get('commit', '-'))}`",
+              "",
+              "## Run configuration",
+              "",
+              "| Setting | Value |",
+              "| --- | --- |",
+              f"| Docker image | `{md(os.environ.get('VLLM_IMAGE', 'unknown'))}` |",
+              f"| Recipes URL | `{md(os.environ.get('RECIPES_BASE_URL', 'unknown'))}` |",
+              f"| Sweep stage | `{md(os.environ.get('SWEEP_STAGE', 'all'))}` |",
+              f"| Input tokens | `{md(os.environ.get('INPUT_TOKENS', 'unknown'))}` |",
+              f"| Output tokens | `{md(os.environ.get('OUTPUT_TOKENS', 'unknown'))}` |",
+              f"| Seed concurrency | `{md(os.environ.get('CONCURRENCY', 'unknown'))}` |",
+              f"| TTFT SLA | `{md(os.environ.get('TTFT_SLA_MS', 'unknown'))} ms` |",
+              f"| TPOT SLA | `{md(os.environ.get('TPOT_SLA_MS', 'unknown'))} ms` |",
+              "",
+              "## System",
+              "",
+              "| Setting | Value |",
+              "| --- | --- |",
+              f"| Host | `{md(hostname)}` |",
+              f"| CPU model | `{md(lscpu.get('Model name', 'unknown'))}` |",
+              f"| Sockets | `{md(lscpu.get('Socket(s)', 'unknown'))}` |",
+              f"| Cores/socket | `{md(lscpu.get('Core(s) per socket', 'unknown'))}` |",
+              f"| Logical CPUs | `{md(lscpu.get('CPU(s)', 'unknown'))}` |",
+              f"| NUMA nodes | `{md(lscpu.get('NUMA node(s)', 'unknown'))}` |",
+          ]
+
+          parallel_rec = (parallel or {}).get("recommended") or {}
+          concurrency_rec = (concurrency or {}).get("recommended") or {}
+          scheduler_rec = (scheduler or {}).get("recommended") or {}
+
+          recommended = []
+          tp = parallel_rec.get("tensor_parallel_size", scheduler_rec.get("tensor_parallel_size"))
+          dp = parallel_rec.get("data_parallel_size", scheduler_rec.get("data_parallel_size"))
+          if tp is not None:
+              recommended.append(("tensor-parallel-size", tp))
+          if dp is not None:
+              recommended.append(("data-parallel-size", dp))
+          if concurrency_rec.get("max_concurrency") is not None:
+              recommended.append(("max concurrency", concurrency_rec["max_concurrency"]))
+          if scheduler:
+              recommended.append(("max-num-seqs", scheduler_value(scheduler_rec.get("max_num_seqs"))))
+              recommended.append(("max-num-batched-tokens", scheduler_value(scheduler_rec.get("max_num_batched_tokens"))))
+
+          lines += ["", "## Sweep Recommendation", ""]
+          if recommended:
+              lines += ["| Parameter | Recommended |", "| --- | ---: |"]
+              lines.extend(f"| `{name}` | {md(value)} |" for name, value in recommended)
+          else:
+              lines.append("No recommendation was produced. Inspect the sweep artifact for diagnostics.")
+
+          stages = []
+          for label, report in (
+              ("Parallel layout", parallel),
+              ("Concurrency", concurrency),
+              ("Scheduler", scheduler),
+          ):
+              if report is None:
+                  continue
+              measured = report.get("measured") or {}
+              stages.append((
+                  label,
+                  str(report.get("status", "unknown")).replace("_", " "),
+                  fmt(measured.get("mean_output_throughput")),
+                  fmt(measured.get("mean_request_goodput"), 3),
+                  fmt_int(measured.get("mean_p99_ttft_ms")),
+                  fmt(measured.get("mean_p99_tpot_ms")),
+              ))
+
+          lines += ["", "## Sweep Results", ""]
+          if stages:
+              lines += [
+                  "| Stage | Status | Output tok/s | Request goodput | P99 TTFT ms | P99 TPOT ms |",
+                  "| --- | --- | ---: | ---: | ---: | ---: |",
+              ]
+              for row in stages:
+                  lines.append("| {} | {} | {} | {} | {} | {} |".format(*map(md, row)))
+          else:
+              lines.append("No sweep recommendation JSON was produced. Inspect the uploaded logs and raw results.")
+
+          if (sweep_dir / "sweep-report.html").is_file():
+              lines += [
+                  "",
+                  "The full `sweep-report.html`, recommendation JSON files, generated configuration, and raw sweep results are included in the workflow artifact.",
+              ]
+
+          out.write_text("\n".join(lines) + "\n")
+          PY
+
+      - name: Upload sweep results
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: xeon6-sweep-${{ github.run_number }}-attempt-${{ github.run_attempt }}
+          path: results/sweep/
+          retention-days: 90
+
+      - name: Cleanup Docker disk usage
+        if: always()
+        shell: bash
+        run: |
+          docker container prune -f || true
+          docker image prune -f || true
+
+      - name: Fail job if sweep failed
+        if: steps.sweep.outcome == 'failure'
+        run: exit 1
