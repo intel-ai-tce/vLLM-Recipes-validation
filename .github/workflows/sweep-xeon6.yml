@@ -43,22 +43,22 @@ on:
         default: "100"
         type: string
       vllm_image:
-        description: "Official vLLM CPU image"
+        description: "(optional) Official vLLM CPU image"
         required: false
         default: "vllm/vllm-openai-cpu:latest-x86_64"
         type: string
       recipe_api_base:
-        description: "Recipes API base URL (production or preview)"
+        description: "(optional) Recipes API base URL (production or preview)"
         required: false
         default: "https://recipes.vllm.ai"
         type: string
       recipe_tools_repo:
-        description: "vLLM repository containing recipe sweep tools"
+        description: "(optional) vLLM repository containing recipe sweep tools"
         required: false
         default: "https://github.com/intel-ai-tce/vllm.git"
         type: string
       recipe_tools_ref:
-        description: "vLLM recipe tools branch, tag, or commit"
+        description: "(optional) vLLM recipe tools branch, tag, or commit"
         required: false
         default: "recipes-staged-sweep-workflow"
         type: string
