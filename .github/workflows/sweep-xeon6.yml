@@ -96,6 +96,37 @@ jobs:
       RESULT_ROOT: ${{ github.workspace }}/results/sweep
 
     steps:
+      - name: Repair stale sweep workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          stale_paths=(
+            "${GITHUB_WORKSPACE}/results/sweep"
+            "${GITHUB_WORKSPACE}/work/sweep"
+          )
+
+          existing=()
+          for path in "${stale_paths[@]}"; do
+            [[ -e "$path" ]] && existing+=("$path")
+          done
+
+          if ((${#existing[@]} == 0)); then
+            echo "No stale sweep workspace found."
+            exit 0
+          fi
+
+          echo "Cleaning stale sweep workspace from a previous run:"
+          printf '  %s\n' "${existing[@]}"
+
+          if rm -rf "${existing[@]}" 2>/dev/null; then
+            exit 0
+          fi
+
+          echo "Runner user could not remove stale files; repairing ownership with sudo."
+          sudo -n chown -R "$(id -u):$(id -g)" "${existing[@]}"
+          rm -rf "${existing[@]}"
+
       - name: Checkout validation harness
         uses: actions/checkout@v6
 

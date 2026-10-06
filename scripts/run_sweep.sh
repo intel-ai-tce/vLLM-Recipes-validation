@@ -16,6 +16,7 @@ OUTPUT_TOKENS=${OUTPUT_TOKENS:-128}
 CONCURRENCY=${CONCURRENCY:-32}
 TTFT_SLA_MS=${TTFT_SLA_MS:-3000}
 TPOT_SLA_MS=${TPOT_SLA_MS:-100}
+SWEEP_SERVER_READY_TIMEOUT=${SWEEP_SERVER_READY_TIMEOUT:-1800}
 WORK_ROOT=${WORK_ROOT:-${GITHUB_WORKSPACE:-$ROOT}/work/sweep}
 RESULT_ROOT=${RESULT_ROOT:-${GITHUB_WORKSPACE:-$ROOT}/results/sweep}
 HF_HOME=${HF_HOME:-$HOME/.cache/huggingface}
@@ -92,7 +93,9 @@ DOCKER_ENV=(
   -e "SWEEP_CONCURRENCY=$CONCURRENCY"
   -e "SWEEP_TTFT_SLA_MS=$TTFT_SLA_MS"
   -e "SWEEP_TPOT_SLA_MS=$TPOT_SLA_MS"
-  -e "HF_HOME=/root/.cache/huggingface"
+  -e "SWEEP_SERVER_READY_TIMEOUT=$SWEEP_SERVER_READY_TIMEOUT"
+  -e "HF_HOME=/hf-cache"
+  -e "HOME=/tmp/vllm-home"
   -e "HOST_UID=$(id -u)"
   -e "HOST_GID=$(id -g)"
 )
@@ -110,6 +113,7 @@ done
 echo "==> Running $SWEEP_STAGE sweep for $MODEL"
 set +e
 docker run --rm \
+  --user "$(id -u):$(id -g)" \
   --entrypoint bash \
   --security-opt seccomp=unconfined \
   --cap-add SYS_NICE \
@@ -117,15 +121,16 @@ docker run --rm \
   "${DOCKER_ENV[@]}" \
   -v "$TOOLS_DIR/tools/recipes:/recipes:ro" \
   -v "$RESULT_ROOT:/output" \
-  -v "$HF_HOME:/root/.cache/huggingface" \
+  -v "$HF_HOME:/hf-cache" \
   -w /output \
   "$VLLM_IMAGE" \
   -lc '
     set -euo pipefail
 
-    # /output is a bind mount into the GitHub Actions workspace. The container
-    # runs as root, so always restore ownership before the container exits.
-    trap '''chown -R "${HOST_UID}:${HOST_GID}" /output || true''' EXIT
+    mkdir -p "$HOME"
+
+    # The container runs as the GitHub runner UID/GID, so bind-mounted sweep
+    # output and the Hugging Face cache remain accessible to the host runner.
 
     python3 /recipes/recipe_json_to_vllm_config.py \
       --model "$SWEEP_MODEL" \
@@ -146,29 +151,36 @@ docker run --rm \
     set +e
     case "$SWEEP_STAGE" in
       all)
-        bash ./run_full_sweep.sh
+        bash ./run_full_sweep.sh --server-ready-timeout "$SWEEP_SERVER_READY_TIMEOUT"
         SWEEP_RC=$?
         ;;
       parallel-layout)
-        bash ./run_parallel_layout_sweep.sh && python3 ./recommend_parallel_layout.py
+        bash ./run_parallel_layout_sweep.sh --server-ready-timeout "$SWEEP_SERVER_READY_TIMEOUT" && python3 ./recommend_parallel_layout.py
         SWEEP_RC=$?
         ;;
       concurrency)
-        bash ./run_concurrency_sweep.sh && python3 ./recommend_concurrency.py
+        bash ./run_concurrency_sweep.sh --server-ready-timeout "$SWEEP_SERVER_READY_TIMEOUT" && python3 ./recommend_concurrency.py
         SWEEP_RC=$?
         ;;
       scheduler)
-        bash ./run_sweep.sh && python3 ./recommend.py
+        bash ./run_sweep.sh --server-ready-timeout "$SWEEP_SERVER_READY_TIMEOUT" && python3 ./recommend.py
         SWEEP_RC=$?
         ;;
     esac
     set -e
 
-    # The report generator accepts partial stage data, so targeted sweeps get
-    # the same self-contained HTML report as a full sweep.
-    python3 ./report.py \
-      --title "vLLM Recipe Sweep - $SWEEP_MODEL" \
-      --output /output/sweep/sweep-report.html || true
+    # The report generator accepts partial stage data, but requires at least
+    # one recommendation JSON. Avoid masking the real sweep failure with a
+    # secondary "No recommendation files found" traceback.
+    if [[ -f parallel-layout-recommendation.json ||
+          -f concurrency-recommendation.json ||
+          -f recommendation.json ]]; then
+      python3 ./report.py \
+        --title "vLLM Recipe Sweep - $SWEEP_MODEL" \
+        --output /output/sweep/sweep-report.html || true
+    else
+      echo "Warning: no sweep recommendation was produced; skipping HTML report." >&2
+    fi
 
     exit "$SWEEP_RC"
   '
