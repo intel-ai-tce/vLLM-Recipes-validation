@@ -52,6 +52,11 @@ on:
         required: false
         default: "https://recipes.vllm.ai"
         type: string
+      recipe_tools_repo:
+        description: "vLLM repository containing recipe sweep tools"
+        required: false
+        default: "https://github.com/intel-ai-tce/vllm.git"
+        type: string
       recipe_tools_ref:
         description: "vLLM recipe tools branch, tag, or commit"
         required: false
@@ -84,7 +89,7 @@ jobs:
       TPOT_SLA_MS: ${{ inputs.tpot_sla_ms }}
       VLLM_IMAGE: ${{ inputs.vllm_image }}
       RECIPES_BASE_URL: ${{ inputs.recipe_api_base }}
-      RECIPE_TOOLS_REPO: https://github.com/intel-ai-tce/vllm.git
+      RECIPE_TOOLS_REPO: ${{ inputs.recipe_tools_repo }}
       RECIPE_TOOLS_REF: ${{ inputs.recipe_tools_ref }}
       HARDWARE: xeon6
       WORK_ROOT: ${{ github.workspace }}/work/sweep
