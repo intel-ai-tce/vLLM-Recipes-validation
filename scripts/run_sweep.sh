@@ -6,10 +6,10 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 : "${MODEL:?MODEL is required}"
 
 SWEEP_STAGE=${SWEEP_STAGE:-all}
-VLLM_IMAGE=${VLLM_IMAGE:-vllm/vllm-openai-cpu:latest-x86_64}
+VLLM_IMAGE=${VLLM_IMAGE:-vllm/vllm-openai-cpu:nightly-x86_64}
 RECIPES_BASE_URL=${RECIPES_BASE_URL:-https://recipes.vllm.ai}
-RECIPE_TOOLS_REPO=${RECIPE_TOOLS_REPO:-https://github.com/intel-ai-tce/vllm.git}
-RECIPE_TOOLS_REF=${RECIPE_TOOLS_REF:-recipes-staged-sweep-workflow}
+RECIPE_TOOLS_REPO=${RECIPE_TOOLS_REPO:-}
+RECIPE_TOOLS_REF=${RECIPE_TOOLS_REF:-}
 HARDWARE=${HARDWARE:-xeon6}
 INPUT_TOKENS=${INPUT_TOKENS:-128}
 OUTPUT_TOKENS=${OUTPUT_TOKENS:-128}
@@ -41,46 +41,91 @@ mkdir -p "$RESULT_ROOT"
 echo "==> Pulling vLLM CPU image: $VLLM_IMAGE"
 docker pull "$VLLM_IMAGE"
 
-echo "==> Fetching recipe sweep tools: $RECIPE_TOOLS_REPO @ $RECIPE_TOOLS_REF"
-TOOLS_DIR=$(mktemp -d "$WORK_ROOT/recipe-tools.XXXXXX")
-trap 'rm -rf "$TOOLS_DIR"' EXIT
-
-git -C "$TOOLS_DIR" init -q
-git -C "$TOOLS_DIR" remote add origin "$RECIPE_TOOLS_REPO"
-git -C "$TOOLS_DIR" fetch --depth 1 origin "$RECIPE_TOOLS_REF"
-git -C "$TOOLS_DIR" checkout -q --detach FETCH_HEAD
-TOOLS_SHA=$(git -C "$TOOLS_DIR" rev-parse HEAD)
-
-if [[ ! -f "$TOOLS_DIR/tools/recipes/recipe_json_to_vllm_config.py" ]]; then
-  echo "ERROR: recipe_json_to_vllm_config.py was not found in requested recipe tools source" >&2
-  exit 2
-fi
-if [[ ! -d "$TOOLS_DIR/tools/recipes/sweep" ]]; then
-  echo "ERROR: tools/recipes/sweep was not found in requested recipe tools source" >&2
-  exit 2
-fi
-
 "$ROOT/scripts/collect_system_info.sh" "$RESULT_ROOT/system-info.txt"
 docker image inspect "$VLLM_IMAGE" > "$RESULT_ROOT/docker-image.json"
 
+# By default, use the Recipes tools shipped in the exact vLLM image under test.
+# For development, set both RECIPE_TOOLS_REPO and RECIPE_TOOLS_REF to clone and
+# bind-mount an alternate tools/recipes tree.
+RECIPE_TOOL_PATH=/vllm-workspace/tools/recipes
+TOOLS_MOUNT_ARGS=()
+TOOLS_DIR=""
+TOOLS_SHA=""
+
+if [[ -n "$RECIPE_TOOLS_REPO" || -n "$RECIPE_TOOLS_REF" ]]; then
+  if [[ -z "$RECIPE_TOOLS_REPO" || -z "$RECIPE_TOOLS_REF" ]]; then
+    echo "ERROR: RECIPE_TOOLS_REPO and RECIPE_TOOLS_REF must be set together." >&2
+    exit 2
+  fi
+
+  echo "==> Using development Recipes tools: $RECIPE_TOOLS_REPO @ $RECIPE_TOOLS_REF"
+  TOOLS_DIR=$(mktemp -d "$WORK_ROOT/recipe-tools.XXXXXX")
+  trap 'rm -rf "$TOOLS_DIR"' EXIT
+
+  git -C "$TOOLS_DIR" init -q
+  git -C "$TOOLS_DIR" remote add origin "$RECIPE_TOOLS_REPO"
+  git -C "$TOOLS_DIR" fetch --depth 1 origin "$RECIPE_TOOLS_REF"
+  git -C "$TOOLS_DIR" checkout -q --detach FETCH_HEAD
+  TOOLS_SHA=$(git -C "$TOOLS_DIR" rev-parse HEAD)
+
+  if [[ ! -f "$TOOLS_DIR/tools/recipes/recipe_json_to_vllm_config.py" ||
+        ! -d "$TOOLS_DIR/tools/recipes/sweep" ]]; then
+    echo "ERROR: requested development source does not contain Recipes sweep tools." >&2
+    exit 2
+  fi
+
+  RECIPE_TOOL_PATH=/recipes
+  TOOLS_MOUNT_ARGS=(-v "$TOOLS_DIR/tools/recipes:/recipes:ro")
+else
+  echo "==> Using Recipes sweep tools bundled in vLLM image"
+  if ! docker run --rm \
+    --entrypoint bash \
+    "$VLLM_IMAGE" \
+    -lc 'test -f /vllm-workspace/tools/recipes/recipe_json_to_vllm_config.py &&
+         test -d /vllm-workspace/tools/recipes/sweep'; then
+    echo "ERROR: $VLLM_IMAGE does not contain Recipes sweep tools under /vllm-workspace/tools/recipes." >&2
+    echo "Use a vLLM image built after PR #57307 or provide recipe_tools_repo/ref overrides." >&2
+    exit 2
+  fi
+fi
+
 python3 - "$RESULT_ROOT/recipe-tools.json" \
   "$RECIPE_TOOLS_REPO" "$RECIPE_TOOLS_REF" "$TOOLS_SHA" \
-  "$VLLM_IMAGE" "$RESULT_ROOT/docker-image.json" <<'PYMETA'
+  "$RECIPE_TOOL_PATH" "$VLLM_IMAGE" "$RESULT_ROOT/docker-image.json" <<'PYMETA'
 import json
 import sys
 from pathlib import Path
 
-out, repo, ref, sha, image, image_info = sys.argv[1:]
+out, repo, ref, sha, tool_path, image, image_info = sys.argv[1:]
 info = json.loads(Path(image_info).read_text())[0]
-Path(out).write_text(json.dumps({
-    "source": "github",
-    "repository": repo,
-    "ref": ref,
-    "commit": sha,
+labels = ((info.get("Config") or {}).get("Labels") or {})
+image_source = labels.get("org.opencontainers.image.source")
+image_revision = labels.get("org.opencontainers.image.revision")
+
+if repo:
+    metadata = {
+        "source": "github-override",
+        "repository": repo,
+        "ref": ref,
+        "commit": sha,
+    }
+else:
+    # Keep repository/ref/commit populated so the existing GitHub step summary
+    # remains useful without requiring a workflow-summary formatting change.
+    metadata = {
+        "source": "docker-image",
+        "repository": image_source or "https://github.com/vllm-project/vllm",
+        "ref": "image",
+        "commit": image_revision,
+    }
+
+metadata.update({
+    "path": tool_path,
     "image": image,
     "image_id": info.get("Id"),
     "image_digests": info.get("RepoDigests", []),
-}, indent=2) + "\n")
+})
+Path(out).write_text(json.dumps(metadata, indent=2) + "\n")
 PYMETA
 
 DOCKER_ENV=(
@@ -94,6 +139,7 @@ DOCKER_ENV=(
   -e "SWEEP_TTFT_SLA_MS=$TTFT_SLA_MS"
   -e "SWEEP_TPOT_SLA_MS=$TPOT_SLA_MS"
   -e "SWEEP_SERVER_READY_TIMEOUT=$SWEEP_SERVER_READY_TIMEOUT"
+  -e "RECIPE_TOOL_PATH=$RECIPE_TOOL_PATH"
   -e "HF_HOME=/hf-cache"
   -e "HOME=/tmp/vllm-home"
   -e "HOST_UID=$(id -u)"
@@ -119,7 +165,7 @@ docker run --rm \
   --cap-add SYS_NICE \
   --shm-size=4g \
   "${DOCKER_ENV[@]}" \
-  -v "$TOOLS_DIR/tools/recipes:/recipes:ro" \
+  "${TOOLS_MOUNT_ARGS[@]}" \
   -v "$RESULT_ROOT:/output" \
   -v "$HF_HOME:/hf-cache" \
   -w /output \
@@ -132,7 +178,7 @@ docker run --rm \
     # The container runs as the GitHub runner UID/GID, so bind-mounted sweep
     # output and the Hugging Face cache remain accessible to the host runner.
 
-    python3 /recipes/recipe_json_to_vllm_config.py \
+    python3 "$RECIPE_TOOL_PATH/recipe_json_to_vllm_config.py" \
       --model "$SWEEP_MODEL" \
       --hardware "$SWEEP_HARDWARE" \
       --api-base "$SWEEP_RECIPES_BASE_URL" \
