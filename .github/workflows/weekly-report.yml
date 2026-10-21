@@ -2,9 +2,13 @@ name: Weekly Xeon 6 Comparison Report
 
 on:
   workflow_dispatch:
-  schedule:
-    # Tuesday after the Monday weekly validation. Manual rerun if validation takes longer.
-    - cron: "0 12 * * 2"
+  workflow_run:
+    workflows:
+      - Weekly Xeon 6 Recipe Validation
+    types:
+      - completed
+    branches:
+      - main
 
 permissions:
   actions: read
