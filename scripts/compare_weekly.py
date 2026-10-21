@@ -84,24 +84,39 @@ def compare(previous, latest, previous_url="", latest_url=""):
             f"{esc(new.get(model, {}).get('status', 'NOT TESTED'))} | {label} |"
         )
 
-    lines += ["", "## Performance (models passing both runs)", "",
-              "| Model | Metric | Previous | Latest | Delta | Direction |",
-              "| --- | --- | ---: | ---: | ---: | --- |"]
-    perf_rows = 0
-    for model in sorted(old.keys() & new.keys()):
-        if old[model].get("status") != "PASS" or new[model].get("status") != "PASS":
-            continue
-        old_metrics, new_metrics = old[model].get("metrics") or {}, new[model].get("metrics") or {}
-        for field, label, direction in METRICS:
-            a, b = number(old_metrics.get(field)), number(new_metrics.get(field))
+    lines += [
+        "", "## Performance (models passing both runs)", "",
+        "🟢 **Improved** · 🔴 **Regressed** · ⚪ **No change** (absolute change < 3%; "
+        "treated as run-to-run variance). Exactly 3% is considered a change.",
+        "Higher throughput is better; lower P99 TTFT/TPOT is better.",
+    ]
+    comparable = [model for model in sorted(old.keys() & new.keys())
+                  if old[model].get("status") == "PASS" and new[model].get("status") == "PASS"]
+    for field, label, direction in METRICS:
+        lines += ["", f"### {label}", "",
+                  "| Model | Previous | Latest | Delta | Assessment |",
+                  "| --- | ---: | ---: | ---: | --- |"]
+        rows = 0
+        for model in comparable:
+            a = number((old[model].get("metrics") or {}).get(field))
+            b = number((new[model].get("metrics") or {}).get(field))
             if a is None or b is None or a <= 0:
                 continue
             delta = (b - a) / a * 100
-            assessment = "Improved" if delta * direction > 0 else "Regressed" if delta * direction < 0 else "Unchanged"
-            lines.append(f"| `{esc(model)}` | {label} | {a:.2f} | {b:.2f} | {delta:+.1f}% | {assessment} |")
-            perf_rows += 1
-    if not perf_rows:
-        lines.append("| — | — | — | — | — | No comparable performance data |")
+            # Use unrounded delta for the threshold: rounding 2.99% to 3.0%
+            # must not turn expected run-to-run variance into a regression.
+            if abs(delta) < 3.0:
+                assessment = "⚪ No change"
+            elif delta * direction > 0:
+                assessment = "🟢 Improved"
+            else:
+                assessment = "🔴 Regressed"
+            lines.append(
+                f"| `{esc(model)}` | {a:.2f} | {b:.2f} | {delta:+.2f}% | **{assessment}** |"
+            )
+            rows += 1
+        if not rows:
+            lines.append("| — | — | — | — | No comparable performance data |")
 
     def metadata(data):
         recipe = data.get("recipe_tools") or {}
@@ -118,7 +133,8 @@ def compare(previous, latest, previous_url="", latest_url=""):
         "", "**Comparison caveat:** The summaries do not fully encode host CPU, container image, "
         "prompt count, and benchmark configuration. Performance changes are observational "
         "until those settings and per-model workloads are verified to match. A missing model "
-        "is not treated as a validation regression.", "",
+        "is not treated as a validation regression. The 3% neutral band is a heuristic, not "
+        "a measured statistical confidence interval.", "",
     ]
     return "\n".join(lines)
 
