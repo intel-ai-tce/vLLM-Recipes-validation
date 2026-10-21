@@ -1,0 +1,174 @@
+name: Weekly Xeon 6 Comparison Report
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Tuesday after the Monday weekly validation. Manual rerun if validation takes longer.
+    - cron: "0 12 * * 2"
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: xeon6-weekly-report
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout report generator
+        uses: actions/checkout@v4
+
+      - name: Locate two most recent weekly summary artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/weekly-input"
+          # A validation job can conclude 'failure' because one model failed,
+          # but its summary is still valid. Therefore do not require success.
+          gh api --paginate \
+            "repos/$GH_REPO/actions/workflows/weekly-xeon6.yml/runs?status=completed&per_page=100" \
+            --jq '.workflow_runs[] | [.id,.run_number,.html_url] | @tsv' \
+            > "$RUNNER_TEMP/weekly-input/runs.tsv"
+
+          found=0
+          while IFS=$'\t' read -r run_id run_number run_url; do
+            [[ -n "$run_id" ]] || continue
+            tmp="$(mktemp -d)"
+            if gh run download "$run_id" --repo "$GH_REPO" \
+              --name "xeon6-weekly-$run_number" --dir "$tmp" 2>/dev/null; then
+              # Weekly artifact contains RESULT_ROOT, including this JSON.
+              summary="$(find "$tmp" -type f -name weekly-summary.json -print -quit)"
+              if [[ -n "$summary" ]]; then
+                cp "$summary" "$RUNNER_TEMP/weekly-input/$found.json"
+                printf '%s\n' "$run_url" > "$RUNNER_TEMP/weekly-input/$found.url"
+                found=$((found+1))
+              fi
+            fi
+            rm -rf "$tmp"
+            [[ "$found" -lt 2 ]] || break
+          done < "$RUNNER_TEMP/weekly-input/runs.tsv"
+          if [[ "$found" -ne 2 ]]; then
+            echo '::error::Need two completed weekly runs with unexpired xeon6-weekly artifacts.'
+            exit 1
+          fi
+
+      - name: Generate comparison
+        shell: bash
+        run: |
+          set -euo pipefail
+          input="$RUNNER_TEMP/weekly-input"
+          python3 scripts/compare_weekly.py \
+            --previous "$input/1.json" \
+            --latest "$input/0.json" \
+            --previous-url "$(cat "$input/1.url")" \
+            --latest-url "$(cat "$input/0.url")" \
+            --output "$RUNNER_TEMP/weekly-latest.md"
+          cat "$RUNNER_TEMP/weekly-latest.md" >> "$GITHUB_STEP_SUMMARY"
+          python3 scripts/report_notifications.py build \
+            --previous "$input/1.json" \
+            --latest "$input/0.json" \
+            --previous-url "$(cat "$input/1.url")" \
+            --latest-url "$(cat "$input/0.url")" \
+            --repo "$GITHUB_REPOSITORY" \
+            --output "$RUNNER_TEMP/weekly-notification.json"
+          # Stable history name, including workflow attempt as recorded in run_id.
+          python3 - "$input/0.json" "$input/1.json" "$GITHUB_ENV" <<'PY'
+          import json, re, sys
+          ids = [str(json.load(open(p)).get('run_id', 'unknown')) for p in sys.argv[1:3]]
+          safe = [re.sub(r'[^A-Za-z0-9_.-]', '_', x) for x in ids]
+          with open(sys.argv[3], 'a') as f:
+              f.write(f'REPORT_FILENAME={safe[0]}-vs-{safe[1]}.md\n')
+          PY
+
+      - name: Publish latest and historical report to report branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Worktree keeps this checkout (and generator code) untouched.
+          publish="$(mktemp -d)"
+          trap 'git worktree remove --force "$publish" >/dev/null 2>&1 || true; rm -rf "$publish"' EXIT
+          git fetch origin report || true
+          if git show-ref --verify --quiet refs/remotes/origin/report; then
+            git worktree add --detach "$publish" origin/report
+          else
+            git worktree add --detach "$publish" HEAD
+            git -C "$publish" checkout --orphan report
+            git -C "$publish" rm -rf . >/dev/null 2>&1 || true
+          fi
+          mkdir -p "$publish/weekly/history"
+          cp "$RUNNER_TEMP/weekly-latest.md" "$publish/weekly/latest.md"
+          cp "$RUNNER_TEMP/weekly-latest.md" "$publish/weekly/history/$REPORT_FILENAME"
+          cat > "$publish/README.md" <<'EOF'
+          # vLLM Recipes validation comparisons
+
+          Automatically generated reports from the Xeon 6 weekly workflow:
+          - [Latest weekly comparison](weekly/latest.md)
+          - [Historical weekly comparisons](weekly/history/)
+
+          Source data: `xeon6-weekly-*` GitHub Actions artifacts (90-day retention).
+          EOF
+          git -C "$publish" add README.md weekly
+          if git -C "$publish" diff --cached --quiet; then
+            echo 'No report changes to publish'
+            exit 0
+          fi
+          git -C "$publish" -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -m 'docs: update Xeon 6 weekly comparison'
+          git -C "$publish" push origin HEAD:report
+
+      - name: Update GitHub Wiki report index (optional)
+        if: ${{ vars.WEEKLY_REPORT_WIKI_ENABLED == 'true' }}
+        env:
+          WIKI_PUSH_TOKEN: ${{ secrets.WIKI_PUSH_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$WIKI_PUSH_TOKEN" ]]; then
+            echo '::warning::WIKI_PUSH_TOKEN missing; skipping Wiki update'
+            exit 0
+          fi
+          # Wiki must already be enabled and initialized by creating its Home page.
+          wiki_dir="$(mktemp -d)"
+          trap 'rm -rf "$wiki_dir"' EXIT
+          auth="$(printf 'x-access-token:%s' "$WIKI_PUSH_TOKEN" | base64 -w0)"
+          if ! git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+              clone --quiet "https://github.com/${GH_REPO}.wiki.git" "$wiki_dir"; then
+            echo '::warning::Wiki unavailable or credential lacks Wiki write permission'
+            exit 0
+          fi
+          python3 scripts/report_notifications.py wiki \
+            --notification "$RUNNER_TEMP/weekly-notification.json" \
+            --output "$wiki_dir/Weekly-Validation-Reports.md"
+          git -C "$wiki_dir" add Weekly-Validation-Reports.md
+          if git -C "$wiki_dir" diff --cached --quiet; then
+            echo 'Wiki index already up to date'
+            exit 0
+          fi
+          git -C "$wiki_dir" -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -m 'docs: update weekly validation report index'
+          git -C "$wiki_dir" -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+            push origin HEAD
+
+      - name: Send weekly report to Power Automate (optional)
+        if: ${{ vars.WEEKLY_REPORT_EMAIL_ENABLED == 'true' }}
+        env:
+          POWER_AUTOMATE_REPORT_URL: ${{ secrets.POWER_AUTOMATE_REPORT_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$POWER_AUTOMATE_REPORT_URL" ]]; then
+            echo '::error::WEEKLY_REPORT_EMAIL_ENABLED=true but POWER_AUTOMATE_REPORT_URL secret is missing'
+            exit 1
+          fi
+          python3 scripts/report_notifications.py send \
+            --notification "$RUNNER_TEMP/weekly-notification.json"
