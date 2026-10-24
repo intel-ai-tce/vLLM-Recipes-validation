@@ -81,6 +81,14 @@ on:
         required: false
         default: ""
         type: string
+      enable_env_sweep:
+        description: "Run reserved CPU environment sweep after scheduler (all stages only)"
+        type: boolean
+        default: false
+      env_sweep_values:
+        description: "Optional reserved CPU values (comma-separated); blank = 0,TP,2*TP"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -116,6 +124,8 @@ jobs:
       RECIPES_BASE_URL: ${{ inputs.recipe_api_base }}
       RECIPE_TOOLS_REPO: ${{ inputs.recipe_tools_repo }}
       RECIPE_TOOLS_REF: ${{ inputs.recipe_tools_ref }}
+      ENABLE_ENV_SWEEP: ${{ inputs.enable_env_sweep }}
+      ENV_SWEEP_VALUES: ${{ inputs.env_sweep_values }}
       # Recipe catalog currently provides Xeon 6 configurations only.
       # This is a cross-generation experiment on non-Xeon-6 physical CPUs.
       HARDWARE: xeon6
@@ -262,6 +272,7 @@ jobs:
           parallel = read_json(sweep_dir / "parallel-layout-recommendation.json")
           concurrency = read_json(sweep_dir / "concurrency-recommendation.json")
           scheduler = read_json(sweep_dir / "recommendation.json")
+          env_sweep = read_json(sweep_dir / "env-sweep-results.json")
 
           lines = [
               "# Intel Xeon Recipe Sweep",
@@ -284,6 +295,8 @@ jobs:
               f"| Docker image | `{md(os.environ.get('VLLM_IMAGE', 'unknown'))}` |",
               f"| Recipes URL | `{md(os.environ.get('RECIPES_BASE_URL', 'unknown'))}` |",
               f"| Sweep stage | `{md(os.environ.get('SWEEP_STAGE', 'all'))}` |",
+              f"| Environment sweep enabled | `{md(os.environ.get('ENABLE_ENV_SWEEP', 'false'))}` |",
+              f"| Environment values | `{md(os.environ.get('ENV_SWEEP_VALUES') or '0,TP,2*TP')}` |",
               f"| Input tokens | `{md(os.environ.get('INPUT_TOKENS', 'unknown'))}` |",
               f"| Output tokens | `{md(os.environ.get('OUTPUT_TOKENS', 'unknown'))}` |",
               f"| Seed concurrency | `{md(os.environ.get('CONCURRENCY', 'unknown'))}` |",
@@ -318,6 +331,8 @@ jobs:
           if scheduler:
               recommended.append(("max-num-seqs", scheduler_value(scheduler_rec.get("max_num_seqs"))))
               recommended.append(("max-num-batched-tokens", scheduler_value(scheduler_rec.get("max_num_batched_tokens"))))
+          if env_sweep and env_sweep.get("recommended") is not None:
+              recommended.append(("VLLM_CPU_NUM_OF_RESERVED_CPU", env_sweep["recommended"]))
 
           lines += ["", "## Sweep Recommendation", ""]
           if recommended:
@@ -354,6 +369,29 @@ jobs:
                   lines.append("| {} | {} | {} | {} | {} | {} |".format(*map(md, row)))
           else:
               lines.append("No sweep recommendation JSON was produced. Inspect the uploaded logs and raw results.")
+
+          lines += ["", "## Environment variable sweep", ""]
+          if env_sweep:
+              lines += [
+                  f"**Status:** `{md(env_sweep.get('status', 'unknown'))}`  ",
+                  f"**Selected TP:** `{md(env_sweep.get('tp', '-'))}`  ",
+                  f"**Fixed concurrency:** `{md(env_sweep.get('concurrency', '-'))}`  ",
+                  f"**Recommended reserved CPUs:** `{md(env_sweep.get('recommended', '-'))}`",
+                  "",
+                  "| Reserved CPU cores | Status | Output tok/s | P99 TTFT ms | P99 TPOT ms | Diagnostics |",
+                  "| ---: | --- | ---: | ---: | ---: | --- |",
+              ]
+              for item in env_sweep.get("candidates", []):
+                  lines.append(
+                      f"| {md(item.get('value', '-'))} | {md(item.get('status', '-'))} | "
+                      f"{fmt(item.get('output_throughput'))} | {fmt_int(item.get('p99_ttft_ms'))} | "
+                      f"{fmt(item.get('p99_tpot_ms'))} | {md(item.get('error', '-'))} |"
+                  )
+              lines.append("Throughput differences within 3% are treated as equivalent; lower reserved-core counts win ties.")
+          elif os.environ.get("ENABLE_ENV_SWEEP", "false").lower() == "true":
+              lines.append("Environment sweep was requested but did not produce results. Inspect logs.")
+          else:
+              lines.append("Disabled (optional stage).")
 
           if (sweep_dir / "sweep-report.html").is_file():
               lines += [

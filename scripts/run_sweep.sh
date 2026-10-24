@@ -16,6 +16,8 @@ OUTPUT_TOKENS=${OUTPUT_TOKENS:-128}
 CONCURRENCY=${CONCURRENCY:-32}
 TTFT_SLA_MS=${TTFT_SLA_MS:-3000}
 TPOT_SLA_MS=${TPOT_SLA_MS:-100}
+ENABLE_ENV_SWEEP=${ENABLE_ENV_SWEEP:-false}
+ENV_SWEEP_VALUES=${ENV_SWEEP_VALUES:-}
 SWEEP_SERVER_READY_TIMEOUT=${SWEEP_SERVER_READY_TIMEOUT:-5400}
 WORK_ROOT=${WORK_ROOT:-${GITHUB_WORKSPACE:-$ROOT}/work/sweep}
 RESULT_ROOT=${RESULT_ROOT:-${GITHUB_WORKSPACE:-$ROOT}/results/sweep}
@@ -28,6 +30,15 @@ case "$SWEEP_STAGE" in
     exit 2
     ;;
 esac
+
+if [[ "$ENABLE_ENV_SWEEP" == true && "$SWEEP_STAGE" != all ]]; then
+  echo "ERROR: environment sweep requires SWEEP_STAGE=all (scheduler recommendation)." >&2
+  exit 2
+fi
+if [[ "$ENABLE_ENV_SWEEP" != true && "$ENABLE_ENV_SWEEP" != false ]]; then
+  echo "ERROR: ENABLE_ENV_SWEEP must be true or false." >&2
+  exit 2
+fi
 
 if ! docker info >/dev/null 2>&1; then
   echo "ERROR: Docker is not available to the GitHub runner user." >&2
@@ -139,6 +150,8 @@ DOCKER_ENV=(
   -e "SWEEP_TTFT_SLA_MS=$TTFT_SLA_MS"
   -e "SWEEP_TPOT_SLA_MS=$TPOT_SLA_MS"
   -e "SWEEP_SERVER_READY_TIMEOUT=$SWEEP_SERVER_READY_TIMEOUT"
+  -e "ENABLE_ENV_SWEEP=$ENABLE_ENV_SWEEP"
+  -e "ENV_SWEEP_VALUES=$ENV_SWEEP_VALUES"
   -e "RECIPE_TOOL_PATH=$RECIPE_TOOL_PATH"
   -e "HF_HOME=/hf-cache"
   -e "HOME=/tmp/vllm-home"
@@ -166,6 +179,7 @@ docker run --rm \
   --shm-size=4g \
   "${DOCKER_ENV[@]}" \
   "${TOOLS_MOUNT_ARGS[@]}" \
+  -v "$ROOT/scripts/run_env_sweep.py:/validation-scripts/run_env_sweep.py:ro" \
   -v "$RESULT_ROOT:/output" \
   -v "$HF_HOME:/hf-cache" \
   -w /output \
@@ -226,6 +240,22 @@ docker run --rm \
         --output /output/sweep/sweep-report.html || true
     else
       echo "Warning: no sweep recommendation was produced; skipping HTML report." >&2
+    fi
+
+    # Final, opt-in stage: use the optimized scheduler configuration and
+    # restart the server for each candidate. The helper updates the HTML report.
+    if [[ "$SWEEP_RC" -eq 0 && "$ENABLE_ENV_SWEEP" == true ]]; then
+      python3 /validation-scripts/run_env_sweep.py \
+        --sweep-dir /output/sweep \
+        --env-file /output/env.sh \
+        --values "$ENV_SWEEP_VALUES" \
+        --model "$SWEEP_MODEL" \
+        --input-tokens "$SWEEP_INPUT_TOKENS" \
+        --output-tokens "$SWEEP_OUTPUT_TOKENS" \
+        --seed-concurrency "$SWEEP_CONCURRENCY" \
+        --ttft-sla-ms "$SWEEP_TTFT_SLA_MS" \
+        --tpot-sla-ms "$SWEEP_TPOT_SLA_MS" \
+        --ready-timeout "$SWEEP_SERVER_READY_TIMEOUT" || SWEEP_RC=$?
     fi
 
     exit "$SWEEP_RC"
