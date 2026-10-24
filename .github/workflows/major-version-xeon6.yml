@@ -204,6 +204,38 @@ jobs:
                   f.write('\nThe full HTML report and per-model logs are also included in the workflow artifact.\n')
           PYREPORT
 
+      - name: Record pinned release and workload metadata for comparisons
+        if: always()
+        shell: bash
+        env:
+          MAJOR_VERSION: ${{ inputs.vllm_version }}
+          MAJOR_RUNNER: ${{ inputs.runner }}
+          MAJOR_MODEL: ${{ inputs.model }}
+          MAJOR_IMAGE_OVERRIDE: ${{ inputs.vllm_image }}
+          MAJOR_RECIPE_API: ${{ inputs.recipe_api_base }}
+          MAJOR_VLLM_ENVS: ${{ inputs.vllm_env_vars }}
+          MAJOR_TOOLS_REPO: ${{ inputs.recipe_tools_repo }}
+          MAJOR_TOOLS_REF: ${{ inputs.recipe_tools_ref }}
+        run: |
+          python3 - <<'PYMETA'
+          import json, os
+          from pathlib import Path
+          value = {
+              'version': os.environ.get('MAJOR_VERSION', ''),
+              'runner': os.environ.get('MAJOR_RUNNER', ''),
+              'model': os.environ.get('MAJOR_MODEL', ''),
+              'image_override': os.environ.get('MAJOR_IMAGE_OVERRIDE', ''),
+              'recipe_api_base': os.environ.get('MAJOR_RECIPE_API', ''),
+              'vllm_env_vars': os.environ.get('MAJOR_VLLM_ENVS', ''),
+              'recipe_tools_repo': os.environ.get('MAJOR_TOOLS_REPO', ''),
+              'recipe_tools_ref': os.environ.get('MAJOR_TOOLS_REF', ''),
+              'bench_num_prompts': os.environ.get('BENCH_NUM_PROMPTS', ''),
+          }
+          root = Path(os.environ['RESULT_ROOT'])
+          root.mkdir(parents=True, exist_ok=True)
+          (root / 'major-run-metadata.json').write_text(json.dumps(value, indent=2) + '\n')
+          PYMETA
+
       - name: Upload major-version results
         if: always()
         uses: actions/upload-artifact@v5

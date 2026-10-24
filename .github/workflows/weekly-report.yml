@@ -15,7 +15,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: xeon6-weekly-report
+  group: xeon6-report-publication
   cancel-in-progress: false
 
 jobs:

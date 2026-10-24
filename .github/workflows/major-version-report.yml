@@ -1,0 +1,79 @@
+name: Major Version Xeon 6 Comparison Report
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows:
+      - Major Version Xeon 6 Recipe Validation
+    types: [completed]
+    branches: [main]
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: xeon6-report-publication
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: [self-hosted, linux, x64, xeon4, recipe-validation]
+    timeout-minutes: 45
+    steps:
+      - name: Checkout report generator
+        uses: actions/checkout@v4
+
+      - name: Build pinned-release comparison
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s scripts -p 'test_compare_major.py' -v
+          python3 scripts/compare_major.py \
+            --repo "$GH_REPO" --output-dir "$RUNNER_TEMP/major-comparison"
+          cat "$RUNNER_TEMP/major-comparison/latest.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish major comparison to report branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          publish="$(mktemp -d)"
+          trap 'git worktree remove --force "$publish" >/dev/null 2>&1 || true; rm -rf "$publish"' EXIT
+          git fetch origin report || true
+          if git show-ref --verify --quiet refs/remotes/origin/report; then
+            git worktree add --detach "$publish" origin/report
+          else
+            git worktree add --detach "$publish" HEAD
+            git -C "$publish" checkout --orphan report
+            git -C "$publish" rm -rf . >/dev/null 2>&1 || true
+          fi
+          mkdir -p "$publish/major/history"
+          name="$(cat "$RUNNER_TEMP/major-comparison/filename.txt")"
+          cp "$RUNNER_TEMP/major-comparison/latest.md" "$publish/major/latest.md"
+          cp "$RUNNER_TEMP/major-comparison/latest.md" "$publish/major/history/$name"
+          git -C "$publish" add major
+          if git -C "$publish" diff --cached --quiet; then
+            echo 'Major report unchanged'
+            exit 0
+          fi
+          git -C "$publish" -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -m 'docs: update Xeon 6 major release comparison'
+          git -C "$publish" push origin HEAD:report
+
+      - name: Send major report to Power Automate (optional)
+        if: ${{ vars.MAJOR_REPORT_EMAIL_ENABLED == 'true' }}
+        env:
+          POWER_AUTOMATE_REPORT_URL: ${{ secrets.POWER_AUTOMATE_REPORT_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$POWER_AUTOMATE_REPORT_URL" ]]; then
+            echo '::error::POWER_AUTOMATE_REPORT_URL is required when major email is enabled'
+            exit 1
+          fi
+          python3 scripts/report_notifications.py send \
+            --notification "$RUNNER_TEMP/major-comparison/notification.json"
