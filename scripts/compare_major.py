@@ -34,6 +34,28 @@ def eligible(meta: dict) -> bool:
     return not meta.get("image_override") and not meta.get("model")
 
 
+def legacy_metadata(summary: dict) -> dict | None:
+    """Recover a pinned release from an older artifact's recorded image tag.
+
+    This is intentionally restricted to official pinned CPU image names, never
+    the workflow run number. Legacy run input equivalence is not verifiable.
+    """
+    recipe = summary.get("recipe_tools") or {}
+    if recipe.get("source") != "image":
+        return None
+    image = str(recipe.get("image") or "")
+    match = re.fullmatch(r"vllm/vllm-openai-cpu:(v\d+\.\d+\.\d+)-x86_64", image)
+    if not match or not recipe.get("image_id"):
+        return None
+    return {
+        "version": match.group(1),
+        "runner": "legacy-unverified", "recipe_api_base": "legacy-unverified",
+        "vllm_env_vars": "legacy-unverified", "recipe_tools_repo": "",
+        "recipe_tools_ref": "legacy-unverified", "bench_num_prompts": "legacy-unverified",
+        "model": "", "image_override": "", "legacy_inferred": True,
+    }
+
+
 def settings(meta: dict) -> tuple:
     return tuple(str(meta.get(k, "")) for k in (
         "runner", "recipe_api_base", "vllm_env_vars", "recipe_tools_repo",
@@ -54,7 +76,13 @@ def select_pair(candidates: list[dict]) -> tuple[dict, dict]:
                   and settings(r["metadata"]) == settings(newest["metadata"])), None)
     if other is None:
         raise ValueError("Need two different pinned releases with matching runner and workload settings")
-    return tuple(sorted((newest, other), key=lambda r: release(r["metadata"]["version"])))
+    pair = tuple(sorted((newest, other), key=lambda r: release(r["metadata"]["version"])))
+    if any(r["metadata"].get("legacy_inferred") for r in pair):
+        left, right = (set(m.get("model") for m in r["summary"].get("models", []))
+                       for r in pair)
+        if not left or left != right:
+            raise ValueError("Legacy artifact model catalogs differ; cannot compare")
+    return pair
 
 
 def candidates_from_github(repo: str, limit: int) -> list[dict]:
@@ -80,12 +108,15 @@ def candidates_from_github(repo: str, limit: int) -> list[dict]:
             root = Path(directory)
             meta_file = next(root.rglob("major-run-metadata.json"), None)
             summary_file = next(root.rglob("weekly-summary.json"), None)
-            if not meta_file or not summary_file:
-                continue  # Pre-metadata runs are intentionally not inferred.
+            if not summary_file:
+                continue
             try:
-                meta = json.loads(meta_file.read_text())
                 summary = json.loads(summary_file.read_text())
-                if not eligible(meta) or not summary.get("models"):
+                if summary.get("run_id") != f"major-{run_number}-attempt-{attempt}":
+                    continue
+                meta = (json.loads(meta_file.read_text()) if meta_file
+                        else legacy_metadata(summary))
+                if not meta or not eligible(meta) or not summary.get("models"):
                     continue
             except (ValueError, OSError, TypeError):
                 continue
@@ -115,7 +146,11 @@ def generate(baseline: dict, candidate: dict, repo: str, output: Path) -> None:
     document += ("\n**Selection:** Newest eligible completed full-catalog run, paired with the "
                  "newest available distinct release on matching runner and workload settings. "
                  "Baseline always uses the lower semantic version. "
-                 "Only runs recording major-run-metadata.json are eligible.\n")
+                 "Legacy artifacts can use the exact recorded Docker image tag and "
+                 "digest to recover the pinned release. For legacy runs, runner, "
+                 "prompt count, environment overrides, and recipe API settings "
+                 "cannot be independently verified; confirm they match before "
+                 "attributing performance differences to the vLLM release.\n")
     notification = make_notification(old, new, repo, baseline["url"], candidate["url"])
     identifier = f"{cv}-vs-{bv}-{candidate['run_id']}-{baseline['run_id']}"
     identifier = re.sub(r"[^A-Za-z0-9_.-]", "_", identifier)
