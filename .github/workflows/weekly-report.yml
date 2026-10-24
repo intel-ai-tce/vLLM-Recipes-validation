@@ -176,3 +176,17 @@ jobs:
           fi
           python3 scripts/report_notifications.py send \
             --notification "$RUNNER_TEMP/weekly-notification.json"
+
+      - name: Notify Teams of weekly report (optional)
+        if: ${{ vars.WEEKLY_REPORT_TEAMS_ENABLED == 'true' }}
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$TEAMS_WEBHOOK_URL" ]]; then
+            echo '::error::WEEKLY_REPORT_TEAMS_ENABLED=true but TEAMS_WEBHOOK_URL secret is missing'
+            exit 1
+          fi
+          python3 scripts/send_teams_report.py \
+            --notification "$RUNNER_TEMP/weekly-notification.json"
