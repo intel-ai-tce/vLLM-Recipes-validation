@@ -22,7 +22,30 @@ def make_notification(previous: dict, latest: dict, repo: str, previous_url: str
     previous_id = str(previous.get("run_id") or "unknown")
     base = f"https://github.com/{repo}"
     exact_id = re.sub(r"[^A-Za-z0-9_.-]", "_", latest_id) + "-vs-" + re.sub(r"[^A-Za-z0-9_.-]", "_", previous_id)
+    # Keep performance comparisons consistent with compare_weekly.py.
+    from compare_weekly import METRICS, number
+    performance = {}
+    comparable = sorted(
+        model for model in old.keys() & new.keys()
+        if old[model].get("status") == "PASS" and new[model].get("status") == "PASS"
+    )
+    for field, label, direction in METRICS:
+        rows = []
+        for model in comparable:
+            before = number((old[model].get("metrics") or {}).get(field))
+            after = number((new[model].get("metrics") or {}).get(field))
+            if before is None or after is None or before <= 0:
+                continue
+            delta = (after - before) / before * 100
+            assessment = ("No change" if abs(delta) < 3.0 else
+                          "Improved" if delta * direction > 0 else "Regressed")
+            rows.append({"model": model, "previous": round(before, 2),
+                         "latest": round(after, 2), "delta_pct": round(delta, 2),
+                         "assessment": assessment})
+        performance[field] = {"label": label, "rows": rows}
+
     return {
+        "performance": performance,
         "title": "Xeon 6 weekly vLLM Recipes validation",
         "report_id": exact_id,
         "date": latest.get("run_date", ""),
