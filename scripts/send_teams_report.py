@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from html import escape
 import json
 import os
 import time
@@ -46,7 +47,7 @@ def build_payload(n: dict) -> dict:
                 (f" (+{len(recovered) - 8} more)" if len(recovered) > 8 else "")
                 if recovered else "No newly recovered models"), "wrap": True},
             {"type": "TextBlock", "text": (
-                "Throughput, P99 TTFT and P99 TPOT tables follow in three Teams posts. "
+                "Full throughput, P99 TTFT and P99 TPOT tables are in the email report. "
                 "Verify matched workloads before attributing performance regressions."),
              "wrap": True, "isSubtle": True, "size": "Small"},
         ],
@@ -119,13 +120,64 @@ def metric_payload(n: dict, key: str) -> dict:
     return card_message(card)
 
 
+def build_email_html(n: dict) -> str:
+    """Standalone Outlook-friendly email with all comparable model rows."""
+    def e(value: object) -> str:
+        return escape(str(value if value is not None else ""), quote=True)
+
+    def cell(value: object, header: bool = False) -> str:
+        tag = "th" if header else "td"
+        style = ("background:#e9eef5;font-weight:bold;" if header else "")
+        return f'<{tag} style="border:1px solid #cbd5e1;padding:6px;{style}">{e(value)}</{tag}>'
+
+    def table(headers: list[str], rows: list[list[object]]) -> str:
+        head = "<tr>" + "".join(cell(x, True) for x in headers) + "</tr>"
+        body = "".join("<tr>" + "".join(cell(x) for x in row) + "</tr>" for row in rows)
+        return '<table style="border-collapse:collapse;width:100%;font-size:13px">' + head + body + "</table>"
+
+    summary = table(["Date", "Tested", "Passed", "Failed", "New failures", "Recovered"], [[
+        n.get("date", ""), n.get("tested", 0), n.get("passed", 0), n.get("failed", 0),
+        len(n.get("new_failures") or []), len(n.get("recovered_models") or []),
+    ]])
+    parts = ['<html><body style="font-family:Arial,sans-serif;color:#202124">',
+             '<h2>Xeon 6 Weekly vLLM Recipes Validation</h2>',
+             '<h3>Weekly summary</h3>', summary]
+    for name, items in (("Newly failing models", n.get("new_failures") or []),
+                        ("Recovered models", n.get("recovered_models") or [])):
+        parts.append(f'<p><strong>{e(name)}:</strong> {e(", ".join(items) if items else "None")}</p>')
+
+    for key, heading in (("output_throughput", "Output Throughput (tok/s)"),
+                         ("p99_ttft_ms", "P99 TTFT (ms)"),
+                         ("p99_tpot_ms", "P99 TPOT (ms)")):
+        info = (n.get("performance") or {}).get(key) or {}
+        rows = []
+        for r in info.get("rows") or []:
+            state = r.get("assessment", "No change")
+            symbol = {"Improved": "🟢", "Regressed": "🔴", "No change": "⚪"}.get(state, "⚪")
+            rows.append([r["model"], f'{r["previous"]:.2f}', f'{r["latest"]:.2f}',
+                         f'{r["delta_pct"]:+.2f}%', symbol + " " + state])
+        parts.append(f'<h3>{e(heading)}</h3>')
+        parts.append(table(["Model", "Previous", "Latest", "Delta", "Assessment"], rows) if rows
+                     else '<p>No comparable performance data.</p>')
+    parts.append('<p>🟢 Improved · 🔴 Regressed · ⚪ No change (&lt;3%). '
+                 'Higher throughput and lower latency are better. '
+                 'Verify equivalent workloads before attributing regressions.</p>')
+    for label, key in (("This weekly report", "exact_report_url"),
+                       ("Latest report", "report_url"), ("Validation run", "latest_run_url")):
+        link = str(n.get(key) or "")
+        if link.startswith("https://github.com/"):
+            parts.append(f'<p><a href="{e(link)}">{e(label)}</a></p>')
+    parts.append('</body></html>')
+    return "\n".join(parts)
+
+
 def build_payloads(n: dict) -> list[dict]:
-    """Exactly four posts: one overview followed by three metric tables."""
+    """One Teams overview post, carrying full HTML for the email branch."""
     if not n.get("performance"):
         raise ValueError("Notification JSON lacks performance; rerun weekly report generation")
     overview = build_payload(n)
-    return [overview] + [metric_payload(n, metric) for metric in (
-        "output_throughput", "p99_ttft_ms", "p99_tpot_ms")]
+    overview["email_html"] = build_email_html(n)
+    return [overview]
 
 
 def send(payload: dict, url: str) -> None:
@@ -160,12 +212,9 @@ def main() -> None:
         print(json.dumps(payloads, indent=2, ensure_ascii=False))
         return
     url = os.environ.get("TEAMS_WEBHOOK_URL", "")
-    for index, payload in enumerate(payloads, start=1):
-        # Teams Workflow webhooks can throttle rapid consecutive submissions.
-        if index > 1:
-            time.sleep(2)
+    for payload in payloads:
         send(payload, url)
-        print(f"Posted Teams card {index}/4")
+    print("Posted Teams overview card with email HTML")
 
 
 if __name__ == "__main__":
