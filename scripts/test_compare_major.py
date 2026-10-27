@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from compare_major import eligible, generate, release, select_pair
+from compare_major import complete, eligible, generate, hardware, release, select_pair
 
 
 def item(version, number, runner="local", model="", image_override=""):
@@ -34,11 +34,61 @@ class MajorReportTests(unittest.TestCase):
         baseline, candidate = select_pair([item("v0.31.0", 5), item("v0.31.0", 4),
                                            item("v0.30.0", 3, runner="aws"),
                                            item("v0.30.0", 2)])
-        self.assertEqual((baseline["run_id"], candidate["run_id"]), ("2", "5"))
+        self.assertEqual((baseline["run_id"], candidate["run_id"]), ("3", "5"))
 
     def test_exclude_partial_and_custom_images(self):
         self.assertFalse(eligible(item("v0.31.0", 1, model="example")["metadata"]))
         self.assertFalse(eligible(item("v0.31.0", 1, image_override="test")["metadata"]))
+
+    def test_latest_same_version_and_failed_workflow_eligible(self):
+        recent = item("v0.32.0", 11)
+        recent["summary"]["models"][0]["status"] = "FAIL"
+        recent["summary"].update(passed=0, failed=1)
+        baseline, candidate = select_pair([recent, item("v0.32.0", 9),
+                                           item("v0.31.0", 8)])
+        self.assertEqual((baseline["run_id"], candidate["run_id"]), ("8", "11"))
+
+    def test_semver_preferred_over_chronology(self):
+        baseline, candidate = select_pair([item("v0.31.0", 12),
+                                           item("v0.32.0", 11),
+                                           item("v0.30.0", 10)])
+        self.assertEqual((baseline["run_id"], candidate["run_id"]), ("12", "11"))
+
+    def test_partial_run_is_excluded(self):
+        partial = item("v0.32.0", 11)
+        partial["summary"]["tested"] = 2
+        baseline, candidate = select_pair([partial, item("v0.32.0", 9),
+                                           item("v0.31.0", 8)])
+        self.assertEqual(candidate["run_id"], "9")
+
+    def test_catalog_validation_requires_all_models(self):
+        summary = item("v0.32.0", 11)["summary"]
+        self.assertTrue(complete(summary, {"models": [{"hf_id": "example"}],
+                                           "discovery_errors": []}))
+        self.assertFalse(complete(summary, {"models": [{"hf_id": "missing"}],
+                                            "discovery_errors": []}))
+        self.assertFalse(complete(summary, {"models": [{"hf_id": "example"}],
+                                            "discovery_errors": [{"error": "bad"}]}))
+
+    def test_parse_hardware(self):
+        system = ("===== lscpu =====\nModel name: Xeon ABC\nCPU(s): 288\n"
+                  "NUMA node(s): 6\n===== free -h =====\nMem: 512Gi 10Gi\n")
+        parsed = hardware(system)
+        self.assertEqual(parsed["Model name"], "Xeon ABC")
+        self.assertEqual(parsed["Memory"], "512Gi")
+
+    def test_hardware_differences_in_markdown_and_email(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            baseline, candidate = item("v0.31.0", 8), item("v0.32.0", 11)
+            baseline["hardware"] = {"Model name": "Xeon A", "NUMA node(s)": "4"}
+            candidate["hardware"] = {"Model name": "Xeon B", "NUMA node(s)": "6"}
+            generate(baseline, candidate, "org/repo", Path(tmp))
+            md = (Path(tmp) / "latest.md").read_text()
+            email = json.loads((Path(tmp) / "notification.json").read_text())["email_html"]
+            self.assertIn("⚠️ Different", md)
+            self.assertIn("Xeon B", md)
+            self.assertIn("Hardware comparison", email)
+            self.assertIn("Xeon B", email)
 
     def test_report_and_html(self):
         with tempfile.TemporaryDirectory() as tmp:
