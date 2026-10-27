@@ -257,6 +257,19 @@ def copy_candidates(work: Path, result_dir: Path) -> None:
             shutil.copy2(src, result_dir / name)
 
 
+def benchmark_shell_command(command: list[str]) -> str:
+    """Render the exact in-container benchmark CLI without docker wrapper/env."""
+    args = command[command.index("vllm"):]
+    return (
+        "#!/usr/bin/env bash\n"
+        "# Run inside the serving vLLM container after starting config.yml.\n"
+        "# The benchmark result directory is mounted at /results/benchmark.\n"
+        "set -euo pipefail\n\n"
+        + (" " + chr(92) + "\n  ").join(shlex.quote(arg) for arg in args)
+        + "\n"
+    )
+
+
 def write_result(path: Path, result: dict) -> None:
     result["finished_at"] = utc_now()
     path.write_text(json.dumps(result, indent=2) + "\n")
@@ -689,6 +702,12 @@ def main() -> int:
         result["benchmark_trust_remote_code"] = trust_remote_code
         if trust_remote_code:
             bench_cmd.append("--trust-remote-code")
+
+        # Persist the resolved client command beside config.yml, even if the
+        # subsequent benchmark fails. History publishing copies this file.
+        (result_dir / "benchmark-command.sh").write_text(
+            benchmark_shell_command(bench_cmd), encoding="utf-8"
+        )
 
         # Optional, best-effort host perf sampling of native CPU execution.
         # Start AFTER readiness and BEFORE the inference probe; the collector

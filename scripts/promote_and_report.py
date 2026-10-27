@@ -54,6 +54,7 @@ def main() -> int:
             tmp.mkdir(parents=True)
             for name in (
                 "config.yml",
+                "benchmark-command.sh",
                 "env.sh",
                 "recipe.json",
                 "result.json",
