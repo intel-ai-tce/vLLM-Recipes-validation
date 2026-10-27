@@ -283,6 +283,7 @@ def main() -> int:
     ap.add_argument("--input-len", type=int, default=128)
     ap.add_argument("--output-len", type=int, default=128)
     ap.add_argument("--num-prompts", type=int, default=5)
+    ap.add_argument("--num-warmups", type=int, default=0)
     ap.add_argument("--max-concurrency", type=int, default=1)
     ap.add_argument("--request-rate", default="inf")
     args = ap.parse_args()
@@ -312,6 +313,7 @@ def main() -> int:
             "input_tokens": args.input_len,
             "output_tokens": args.output_len,
             "num_prompts": args.num_prompts,
+            "num_warmups": args.num_warmups,
             "max_concurrency": args.max_concurrency,
             "request_rate": args.request_rate,
         },
@@ -541,6 +543,7 @@ def main() -> int:
             "backend": backend,
             "endpoint": endpoint,
             "dataset_name": dataset_name,
+            "num_warmups": args.num_warmups,
         }
 
         python_packages = benchmark_override.get("python_packages", [])
@@ -621,6 +624,8 @@ def main() -> int:
             dataset_name,
             "--num-prompts",
             str(args.num_prompts),
+            "--num-warmups",
+            str(args.num_warmups),
             "--request-rate",
             str(args.request_rate),
             "--max-concurrency",

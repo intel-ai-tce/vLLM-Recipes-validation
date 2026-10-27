@@ -62,7 +62,7 @@ def settings(meta: dict) -> tuple:
     return tuple(str(meta.get(k, "")) for k in (
         "recipe_api_base", "vllm_env_vars", "recipe_tools_repo",
         "recipe_tools_ref", "bench_num_prompts",
-    ))
+    )) + (str(meta.get("bench_num_warmups", "0")),)
 
 
 def complete(summary: dict, discovery: dict | None = None) -> bool:
@@ -173,6 +173,14 @@ def candidates_from_github(repo: str, limit: int) -> list[dict]:
                     continue
                 meta = (json.loads(meta_file.read_text()) if meta_file
                         else legacy_metadata(summary))
+                # Prefer recorded per-model workload settings. Older artifacts
+                # had no warmup setting and therefore used zero warmups.
+                warmups = {str((m.get("workload") or {}).get("num_warmups", 0))
+                           for m in summary.get("models", [])}
+                if len(warmups) != 1:
+                    continue  # Mixed warmup policies are not comparable.
+                if meta is not None:
+                    meta["bench_num_warmups"] = warmups.pop()
                 discovery = json.loads(discovery_file.read_text()) if discovery_file else None
                 if not meta or not eligible(meta) or not complete(summary, discovery):
                     continue
@@ -222,6 +230,14 @@ def generate(baseline: dict, candidate: dict, repo: str, output: Path) -> None:
     hw_table += ["", "Hardware comes from the archived system-info.txt. "
                  "A missing value is not evidence of matching hardware.", ""]
     document += "\n".join(hw_table)
+    baseline_warmups = baseline["metadata"].get("bench_num_warmups", "0")
+    candidate_warmups = candidate["metadata"].get("bench_num_warmups", "0")
+    document += ("\n## Benchmark warmup policy\n\n"
+                 "| Setting | Baseline | Candidate |\n| --- | ---: | ---: |\n"
+                 f"| Unmeasured warmup requests per model | {baseline_warmups} | "
+                 f"{candidate_warmups} |\n\n"
+                 "Warmup requests are excluded from the measured prompt count. "
+                 "Historical major artifacts without this field are treated as zero warmups.\n")
     if baseline["metadata"].get("legacy_inferred") or candidate["metadata"].get("legacy_inferred"):
         document += "\n⚠️ **Legacy metadata:** Workload equivalence cannot be confirmed.\n"
     if not baseline.get("catalog_verified", True) or not candidate.get("catalog_verified", True):
@@ -270,6 +286,11 @@ def generate(baseline: dict, candidate: dict, repo: str, output: Path) -> None:
         html = html.replace("</body>", hardware_html + "</body>")
     else:
         html += hardware_html
+    warmup_html = ("<h2>Benchmark warmup policy</h2><p>Unmeasured warmup requests "
+                   f"per model: baseline {html_lib.escape(str(baseline_warmups))}; "
+                   f"candidate {html_lib.escape(str(candidate_warmups))}. "
+                   "Historical runs without recorded warmups count as zero.</p>")
+    html = html.replace("</body>", warmup_html + "</body>") if "</body>" in html else html + warmup_html
     notification["email_html"] = html
     output.mkdir(parents=True, exist_ok=True)
     (output / "latest.md").write_text(document, encoding="utf-8")

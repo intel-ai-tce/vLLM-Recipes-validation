@@ -95,6 +95,7 @@ python3 "$ROOT/scripts/run_all.py" \
   --input-len "$BENCH_INPUT_LEN" \
   --output-len "$BENCH_OUTPUT_LEN" \
   --num-prompts "$BENCH_NUM_PROMPTS" \
+  --num-warmups "$BENCH_NUM_WARMUPS" \
   --max-concurrency "$BENCH_MAX_CONCURRENCY" \
   --request-rate "$BENCH_REQUEST_RATE" \
   --server-timeout "$SERVER_START_TIMEOUT_SEC" \

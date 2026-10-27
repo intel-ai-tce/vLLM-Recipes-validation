@@ -27,6 +27,7 @@ def main() -> int:
     ap.add_argument("--input-len", type=int, default=128)
     ap.add_argument("--output-len", type=int, default=128)
     ap.add_argument("--num-prompts", type=int, default=5)
+    ap.add_argument("--num-warmups", type=int, default=0)
     ap.add_argument("--max-concurrency", type=int, default=1)
     ap.add_argument("--request-rate", default="inf")
     ap.add_argument("--server-timeout", type=int, default=3600)
@@ -78,6 +79,8 @@ def main() -> int:
             str(args.output_len),
             "--num-prompts",
             str(args.num_prompts),
+            "--num-warmups",
+            str(args.num_warmups),
             "--max-concurrency",
             str(args.max_concurrency),
             "--request-rate",

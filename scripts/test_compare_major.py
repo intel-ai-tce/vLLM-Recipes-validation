@@ -90,6 +90,16 @@ class MajorReportTests(unittest.TestCase):
             self.assertIn("Hardware comparison", email)
             self.assertIn("Xeon B", email)
 
+    def test_warmup_policy_must_match(self):
+        old = item("v0.31.0", 8)  # Historical run: no field means zero warmups.
+        new = item("v0.32.0", 11)
+        new["metadata"]["bench_num_warmups"] = "3"
+        with self.assertRaisesRegex(ValueError, "compatible workload"):
+            select_pair([new, old])
+        old["metadata"]["bench_num_warmups"] = "3"
+        baseline, candidate = select_pair([new, old])
+        self.assertEqual((baseline["run_id"], candidate["run_id"]), ("8", "11"))
+
     def test_report_and_html(self):
         with tempfile.TemporaryDirectory() as tmp:
             generate(item("v0.30.0", 1), item("v0.31.0", 2), "org/repo", Path(tmp))
