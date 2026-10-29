@@ -63,6 +63,61 @@ jobs:
             exit 1
           fi
 
+      - name: Collect scheduled nightly validation summaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          input="$RUNNER_TEMP/weekly-input"
+          mkdir -p "$input/nightly"
+          # Use creation times of the two weekly runs, not report execution time.
+          # The first two lines may not have valid artifacts; use selected URLs instead.
+          latest_url="$(cat "$input/0.url")"
+          previous_url="$(cat "$input/1.url")"
+          latest_id="${latest_url##*/}"
+          previous_id="${previous_url##*/}"
+          start="$(gh api "repos/$GH_REPO/actions/runs/$previous_id" --jq .created_at)"
+          end="$(gh api "repos/$GH_REPO/actions/runs/$latest_id" --jq .created_at)"
+          export NIGHTLY_START="$start" NIGHTLY_END="$end" NIGHTLY_DIR="$input/nightly"
+          gh api --paginate "repos/$GH_REPO/actions/workflows/nightly-xeon6.yml/runs?event=schedule&status=completed&per_page=100" \
+            --jq '.workflow_runs[] | [.id,.run_number,.created_at,.html_url,.event] | @tsv' \
+            > "$input/nightly-runs.tsv"
+          python3 - "$input/nightly-runs.tsv" "$input/nightly-selected.tsv" <<'PY'
+          import datetime, os, sys
+          def dt(s): return datetime.datetime.fromisoformat(s.replace('Z','+00:00'))
+          start, end = dt(os.environ['NIGHTLY_START']), dt(os.environ['NIGHTLY_END'])
+          with open(sys.argv[2], 'w') as out:
+              for line in open(sys.argv[1]):
+                  parts = line.rstrip('\n').split('\t')
+                  if len(parts) == 5 and start <= dt(parts[2]) < end:
+                      out.write(line)
+          PY
+          : > "$input/nightly-manifest.jsonl"
+          while IFS=$'\t' read -r id number created url event; do
+            [[ -n "$id" ]] || continue
+            target="$input/nightly/$id"
+            mkdir -p "$target"
+            summary=""
+            if gh run download "$id" --repo "$GH_REPO" --name "xeon6-nightly-$number" --dir "$target" 2>/dev/null; then
+              summary="$(find "$target" -type f -name weekly-summary.json -print -quit)"
+            fi
+            python3 - "$id" "$created" "$url" "$event" "$summary" >> "$input/nightly-manifest.jsonl" <<'PY'
+          import json, sys
+          print(json.dumps(dict(id=sys.argv[1],created_at=sys.argv[2],url=sys.argv[3],event=sys.argv[4],summary=sys.argv[5])))
+          PY
+          done < "$input/nightly-selected.tsv"
+          python3 - "$input/nightly-manifest.jsonl" "$input/nightly-manifest.json" <<'PY'
+          import json,sys
+          with open(sys.argv[2],'w') as f:
+              json.dump([json.loads(line) for line in open(sys.argv[1]) if line.strip()],f)
+          PY
+          python3 scripts/summarize_nightly.py \
+            --manifest "$input/nightly-manifest.json" \
+            --start "$start" --end "$end" \
+            --output "$RUNNER_TEMP/nightly-weekly.md"
+
       - name: Generate comparison
         shell: bash
         run: |
@@ -74,6 +129,7 @@ jobs:
             --previous-url "$(cat "$input/1.url")" \
             --latest-url "$(cat "$input/0.url")" \
             --output "$RUNNER_TEMP/weekly-latest.md"
+          cat "$RUNNER_TEMP/nightly-weekly.md" >> "$RUNNER_TEMP/weekly-latest.md"
           cat "$RUNNER_TEMP/weekly-latest.md" >> "$GITHUB_STEP_SUMMARY"
           python3 scripts/report_notifications.py build \
             --previous "$input/1.json" \
