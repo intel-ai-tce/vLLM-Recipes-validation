@@ -78,11 +78,17 @@ def complete(summary: dict, discovery: dict | None = None) -> bool:
             summary.get("failed") != sum(row["status"] == "FAIL" for row in models)):
         return False
     if discovery is not None:
-        if discovery.get("discovery_errors"):
-            return False
         expected = [row.get("hf_id") for row in discovery.get("models", [])]
         if not expected or len(set(expected)) != len(expected) or set(expected) != set(ids):
             return False
+        # Preserve strict model/result matching, but tolerate transient recipe
+        # lookup failures outside the successfully discovered catalog.
+        for err in discovery.get("discovery_errors") or []:
+            if not isinstance(err, dict) or not any(
+                word in str(err.get("error", "")).lower()
+                for word in ("connection reset", "timed out", "timeout", "temporary failure")
+            ):
+                return False
     return True
 
 
@@ -212,7 +218,8 @@ def candidates_from_github(repo: str, limit: int) -> list[dict]:
             found.append({"metadata": meta, "summary": summary, "url": url,
                           "run_id": run_id,
                           "hardware": hardware(system_file.read_text()) if system_file else {},
-                          "catalog_verified": discovery is not None})
+                          "catalog_verified": discovery is not None,
+                          "discovery_errors": (discovery or {}).get("discovery_errors") or []})
             # Scan the full window: newer-by-version may have run earlier in time.
             # Only selecting the first available pair could pick older versions.
     return found
@@ -266,6 +273,16 @@ def generate(baseline: dict, candidate: dict, repo: str, output: Path) -> None:
     if not baseline.get("catalog_verified", True) or not candidate.get("catalog_verified", True):
         document += "\n⚠️ **Catalog evidence:** At least one run lacked archived discovery.json. " \
                     "Only the summary's terminal result counts could be checked.\n"
+    for label, run in (("Baseline", baseline), ("Candidate", candidate)):
+        errors = run.get("discovery_errors") or []
+        if errors:
+            document += (f"\n⚠️ **{label} recipe discovery warnings ({len(errors)}):**\n\n"
+                         "All models in the discovered catalog have terminal results; "
+                         "the following additional recipe lookups failed:\n\n")
+            for err in errors:
+                model_id = str(err.get("hf_id", "unknown")).replace("`", "")
+                message = str(err.get("error", "unknown")).replace("|", "/")
+                document += f"- `{model_id}`: {message}\n"
     document += ("\n**Selection:** Newest eligible completed full-catalog run, paired with the "
                  "newest distinct release with compatible workload settings. "
                  "Baseline always uses the lower semantic version. "
@@ -314,6 +331,19 @@ def generate(baseline: dict, candidate: dict, repo: str, output: Path) -> None:
                    f"candidate {html_lib.escape(str(candidate_warmups))}. "
                    "Historical runs without recorded warmups count as zero.</p>")
     html = html.replace("</body>", warmup_html + "</body>") if "</body>" in html else html + warmup_html
+    warnings = []
+    for label, run in (("Baseline", baseline), ("Candidate", candidate)):
+        for err in run.get("discovery_errors") or []:
+            content = (f"{label}: {err.get('hf_id', 'unknown')}: "
+                       f"{err.get('error', 'unknown')}")
+            warnings.append("<li>" + html_lib.escape(content) + "</li>")
+    if warnings:
+        warning_html = ("<h2>Recipe discovery warnings</h2>"
+                        "<p>All discovered catalog models completed, but "
+                        "additional recipe lookups failed:</p><ul>"
+                        + "".join(warnings) + "</ul>")
+        html = (html.replace("</body>", warning_html + "</body>")
+                if "</body>" in html else html + warning_html)
     notification["email_html"] = html
     output.mkdir(parents=True, exist_ok=True)
     (output / "latest.md").write_text(document, encoding="utf-8")

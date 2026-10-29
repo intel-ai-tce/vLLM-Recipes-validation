@@ -93,6 +93,18 @@ class MajorReportTests(unittest.TestCase):
         self.assertFalse(complete(summary, {"models": [{"hf_id": "example"}],
                                             "discovery_errors": [{"error": "bad"}]}))
 
+    def test_transient_discovery_failure_with_complete_catalog(self):
+        summary = item("v0.31.0", 15)["summary"]
+        discovery = {"models": [{"hf_id": "example"}],
+                     "discovery_errors": [{"hf_id": "missing-recipe",
+                                           "error": "Connection reset by peer"}]}
+        self.assertTrue(complete(summary, discovery))
+        discovery["discovery_errors"][0]["error"] = "Invalid recipe definition"
+        self.assertFalse(complete(summary, discovery))
+        discovery["discovery_errors"][0]["error"] = "Connection reset by peer"
+        discovery["models"][0]["hf_id"] = "different"
+        self.assertFalse(complete(summary, discovery))
+
     def test_parse_hardware(self):
         system = ("===== lscpu =====\nModel name: Xeon ABC\nCPU(s): 288\n"
                   "NUMA node(s): 6\n===== free -h =====\nMem: 512Gi 10Gi\n")
