@@ -109,8 +109,10 @@ def hardware(system_info: str) -> dict:
 
 def compatible(first: dict, second: dict) -> bool:
     a, b = first["metadata"], second["metadata"]
-    # Historical runs without metadata are comparable only when the catalogs
-    # agree. Their unverified settings are called out explicitly in the report.
+    # Never bypass the warmup check, including for legacy metadata.
+    if str(a.get("bench_num_warmups", "0")) != str(b.get("bench_num_warmups", "0")):
+        return False
+    # Other settings in legacy runs may be unverified, so check model IDs.
     if a.get("legacy_inferred") or b.get("legacy_inferred"):
         return ({row["model"] for row in first["summary"]["models"]} ==
                 {row["model"] for row in second["summary"]["models"]})
@@ -141,6 +143,8 @@ def select_pair(candidates: list[dict]) -> tuple[dict, dict]:
         for baseline in by_release[baseline_version]:
             if compatible(baseline, candidate):
                 return baseline, candidate
+            print(f"Skipping baseline {baseline['summary'].get('run_id')}: "
+                  "incompatible benchmark policy or model catalog")
 
     raise ValueError("No compatible lower-release run with compatible workload "
                      "settings for newest eligible "
@@ -167,6 +171,7 @@ def candidates_from_github(repo: str, limit: int) -> list[dict]:
                                 "--name", artifact, "--dir", directory], check=True,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180)
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                print(f"Skipping run #{run_number} attempt {attempt}: artifact unavailable")
                 continue
             root = Path(directory)
             meta_file = next(root.rglob("major-run-metadata.json"), None)
@@ -174,10 +179,12 @@ def candidates_from_github(repo: str, limit: int) -> list[dict]:
             discovery_file = next(root.rglob("discovery.json"), None)
             system_file = next(root.rglob("system-info.txt"), None)
             if not summary_file:
+                print(f"Skipping run #{run_number}: weekly-summary.json missing")
                 continue
             try:
                 summary = json.loads(summary_file.read_text())
                 if summary.get("run_id") != f"major-{run_number}-attempt-{attempt}":
+                    print(f"Skipping run #{run_number}: summary ID mismatch")
                     continue
                 meta = (json.loads(meta_file.read_text()) if meta_file
                         else legacy_metadata(summary))
@@ -186,13 +193,21 @@ def candidates_from_github(repo: str, limit: int) -> list[dict]:
                 warmups = {str((m.get("workload") or {}).get("num_warmups", 0))
                            for m in summary.get("models", [])}
                 if len(warmups) != 1:
-                    continue  # Mixed warmup policies are not comparable.
+                    print(f"Skipping run #{run_number}: mixed warmup policies")
+                    continue
                 if meta is not None:
                     meta["bench_num_warmups"] = warmups.pop()
                 discovery = json.loads(discovery_file.read_text()) if discovery_file else None
-                if not meta or not eligible(meta) or not complete(summary, discovery):
+                if not meta or not eligible(meta):
+                    print(f"Skipping run #{run_number}: ineligible/missing metadata")
                     continue
-            except (ValueError, OSError, TypeError):
+                if not complete(summary, discovery):
+                    print(f"Skipping run #{run_number}: incomplete catalog/results "
+                          f"(tested={summary.get('tested')}, "
+                          f"recorded={len(summary.get('models') or [])})")
+                    continue
+            except (ValueError, OSError, TypeError) as exc:
+                print(f"Skipping run #{run_number}: artifact parsing failed: {exc}")
                 continue
             found.append({"metadata": meta, "summary": summary, "url": url,
                           "run_id": run_id,
