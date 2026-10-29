@@ -73,6 +73,9 @@ jobs:
       # Allow large models loading from CIFS to finish initialization.
       # Major-version only; weekly/nightly retain the 3600s default.
       SERVER_START_TIMEOUT_SEC: "7200"
+      # Rust/Python vLLM engine registration defaults to only 600 seconds.
+      # The container launcher passes this into the vLLM server process.
+      VLLM_ENGINE_READY_TIMEOUT_S: "1800"
       # Extended timeout for the 100-prompt major-version qualification.
       BENCH_TIMEOUT_SEC: "7200"
       VALIDATION_RUN_ID: major-${{ github.run_number }}-attempt-${{ github.run_attempt }}

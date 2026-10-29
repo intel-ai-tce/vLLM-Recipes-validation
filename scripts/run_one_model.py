@@ -448,6 +448,9 @@ def main() -> int:
         "HTTP_PROXY",
         "HTTPS_PROXY",
         "NO_PROXY",
+        # vLLM Rust frontend / Python engine registration timeout.
+        # Pass the workflow value through to the server container.
+        "VLLM_ENGINE_READY_TIMEOUT_S",
     )
     for name in inherited_env:
         if os.environ.get(name):
