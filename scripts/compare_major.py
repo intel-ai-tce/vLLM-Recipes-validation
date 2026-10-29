@@ -118,26 +118,34 @@ def compatible(first: dict, second: dict) -> bool:
 
 
 def select_pair(candidates: list[dict]) -> tuple[dict, dict]:
-    """Prefer newer releases, with the newest complete run for each release.
+    """Use newest eligible highest release and newest compatible lower run.
 
-    Candidates arrive newest-first from GitHub Actions; repeated attempts for
-    one version supersede older ones, whether PASS or FAIL at workflow level.
+    GitHub artifacts are supplied newest first. Preserve ALL eligible attempts
+    per release so an incompatible recent baseline does not hide an earlier
+    compatible attempt. A complete run with model-level failures is eligible.
     """
     by_release = {}
     for run in candidates:
         if eligible(run["metadata"]) and complete(run["summary"]):
-            by_release.setdefault(release(run["metadata"]["version"]), run)
-    versions = sorted(by_release, reverse=True)
-    for candidate_version in versions:
-        candidate = by_release[candidate_version]
-        for baseline_version in versions:
-            if baseline_version < candidate_version:
-                baseline = by_release[baseline_version]
-                if compatible(baseline, candidate):
-                    return baseline, candidate
-    raise ValueError("Need two different pinned releases with complete full-catalog "
-                     "results and compatible workload settings. Failed workflow "
-                     "runs are eligible when all models finished.")
+            by_release.setdefault(release(run["metadata"]["version"]), []).append(run)
+
+    if not by_release:
+        raise ValueError("No eligible full-catalog major validation runs")
+
+    candidate_version = max(by_release)
+    candidate = by_release[candidate_version][0]
+
+    for baseline_version in sorted(by_release, reverse=True):
+        if baseline_version >= candidate_version:
+            continue
+        for baseline in by_release[baseline_version]:
+            if compatible(baseline, candidate):
+                return baseline, candidate
+
+    raise ValueError("No compatible lower-release run with compatible workload "
+                     "settings for newest eligible "
+                     f"vLLM release {candidate['metadata']['version']}; "
+                     "check workload and warmup settings.")
 
 
 def candidates_from_github(repo: str, limit: int) -> list[dict]:

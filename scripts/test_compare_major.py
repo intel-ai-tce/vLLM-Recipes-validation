@@ -54,6 +54,29 @@ class MajorReportTests(unittest.TestCase):
                                            item("v0.30.0", 10)])
         self.assertEqual((baseline["run_id"], candidate["run_id"]), ("12", "11"))
 
+    def test_latest_compatible_baseline(self):
+        baseline, candidate = select_pair([item("v0.31.0", 15),
+                                           item("v0.32.0", 14),
+                                           item("v0.31.0", 9)])
+        self.assertEqual((baseline["run_id"], candidate["run_id"]), ("15", "14"))
+
+    def test_fallback_to_older_attempt_of_same_version(self):
+        newest = item("v0.31.0", 15)
+        newest["metadata"]["bench_num_warmups"] = "0"
+        candidate = item("v0.32.0", 14)
+        candidate["metadata"]["bench_num_warmups"] = "3"
+        older = item("v0.31.0", 9)
+        older["metadata"]["bench_num_warmups"] = "3"
+        baseline, selected = select_pair([newest, candidate, older])
+        self.assertEqual((baseline["run_id"], selected["run_id"]), ("9", "14"))
+
+    def test_do_not_fallback_to_older_candidate_release(self):
+        newest = item("v0.32.0", 14)
+        newest["metadata"]["bench_num_warmups"] = "3"
+        with self.assertRaisesRegex(ValueError, "No compatible lower-release"):
+            select_pair([newest, item("v0.31.0", 9)])
+
+
     def test_partial_run_is_excluded(self):
         partial = item("v0.32.0", 11)
         partial["summary"]["tested"] = 2
