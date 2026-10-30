@@ -146,6 +146,11 @@ def build_email_html(n: dict) -> str:
                         ("Recovered models", n.get("recovered_models") or [])):
         parts.append(f'<p><strong>{e(name)}:</strong> {e(", ".join(items) if items else "None")}</p>')
 
+    # Show nightly results before the performance tables.
+    nightly_html = n.get("nightly_email_html") or ""
+    if nightly_html:
+        parts.append(nightly_html)
+
     for key, heading in (("output_throughput", "Output Throughput (tok/s)"),
                          ("p99_ttft_ms", "P99 TTFT (ms)"),
                          ("p99_tpot_ms", "P99 TPOT (ms)")):
