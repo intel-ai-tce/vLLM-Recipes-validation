@@ -230,8 +230,16 @@ docker run --rm \
         SWEEP_RC=$?
         ;;
       scheduler)
-        bash ./run_sweep.sh --server-ready-timeout "$SWEEP_SERVER_READY_TIMEOUT" && python3 ./recommend.py
-        SWEEP_RC=$?
+        if bash ./run_sweep.sh --server-ready-timeout "$SWEEP_SERVER_READY_TIMEOUT" && python3 ./recommend.py; then
+          SWEEP_RC=0
+        elif [[ -f concurrency-recommendation.json && -f parallel-layout-config.yml &&
+                -f ./scheduler_fallback.py ]]; then
+          # Only the upstream helper can authorize an SLA-feasible fallback.
+          python3 ./scheduler_fallback.py --sweep-dir .
+          SWEEP_RC=$?
+        else
+          SWEEP_RC=2
+        fi
         ;;
     esac
     set -e

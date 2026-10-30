@@ -72,6 +72,7 @@ def html_section(report):
     return ("<section><h2>Environment variable sweep (final stage)</h2>"
             f"<p>{KEY}: selected {html.escape(str(report.get('recommended')))}; "
             f"TP={report['tp']}, concurrency={report['concurrency']}; "
+            f"scheduler source={html.escape(str(report.get('scheduler_source', 'unknown')))}; "
             f"CPU binding={html.escape(report.get('cpu_binding', 'unknown'))}; "
             "throughput differences within 3% treated as equivalent.</p>"
             "<table border='1'><tr><th>Reserved CPUs</th><th>Status</th>"
@@ -113,8 +114,13 @@ def main():
     tokenizer = config.get("model") or args.model
     output_dir = sweep / "env-sweep"
     output_dir.mkdir(exist_ok=True)
+    scheduler_path = sweep / "recommendation.json"
+    scheduler_report = (json.loads(scheduler_path.read_text())
+                        if scheduler_path.is_file() else {})
+    scheduler_source = scheduler_report.get("status", "unknown")
     results = {"variable": KEY, "tp": tp, "concurrency": concurrency,
                "cpu_binding": "auto", "ipc_isolation": "fresh-docker-container",
+               "scheduler_source": scheduler_source,
                "values": values, "recommended": None, "candidates": [],
                "ttft_sla_ms": args.ttft_sla_ms, "tpot_sla_ms": args.tpot_sla_ms,
                "variance_percent": 3.0}
