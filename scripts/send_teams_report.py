@@ -177,6 +177,8 @@ def build_payloads(n: dict) -> list[dict]:
         raise ValueError("Notification JSON lacks performance; rerun weekly report generation")
     overview = build_payload(n)
     overview["email_html"] = build_email_html(n)
+    overview["date"] = n.get("date", "")
+    overview["nightly_email_html"] = n.get("nightly_email_html", "")
     return [overview]
 
 
