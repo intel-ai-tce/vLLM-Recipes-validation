@@ -179,7 +179,6 @@ docker run --rm \
   --shm-size=4g \
   "${DOCKER_ENV[@]}" \
   "${TOOLS_MOUNT_ARGS[@]}" \
-  -v "$ROOT/scripts/run_env_sweep.py:/validation-scripts/run_env_sweep.py:ro" \
   -v "$RESULT_ROOT:/output" \
   -v "$HF_HOME:/hf-cache" \
   -w /output \
@@ -192,7 +191,15 @@ docker run --rm \
     # The container runs as the GitHub runner UID/GID, so bind-mounted sweep
     # output and the Hugging Face cache remain accessible to the host runner.
 
+    # PR #62867 fixes native CPU DP/NUMA auto-binding. Older Recipes tools
+    # default to an explicit workaround; newer tools remove the flag entirely.
+    # Disable the workaround only when its CLI option exists.
+    CONVERTER_ARGS=()
+    if python3 "$RECIPE_TOOL_PATH/recipe_json_to_vllm_config.py" --help | grep -q -- "--no-tp-dp-numa-bind-workaround"; then
+      CONVERTER_ARGS+=(--no-tp-dp-numa-bind-workaround)
+    fi
     python3 "$RECIPE_TOOL_PATH/recipe_json_to_vllm_config.py" \
+      "${CONVERTER_ARGS[@]}" \
       --model "$SWEEP_MODEL" \
       --hardware "$SWEEP_HARDWARE" \
       --api-base "$SWEEP_RECIPES_BASE_URL" \
@@ -242,9 +249,37 @@ docker run --rm \
       echo "Warning: no sweep recommendation was produced; skipping HTML report." >&2
     fi
 
-    # Final, opt-in stage: use the optimized scheduler configuration and
-    # restart the server for each candidate. The helper updates the HTML report.
-    if [[ "$SWEEP_RC" -eq 0 && "$ENABLE_ENV_SWEEP" == true ]]; then
+    exit "$SWEEP_RC"
+  '
+SWEEP_RC=$?
+set -e
+
+# Isolate the final environment sweep from the main sweep's /dev/shm.
+# The former executed inside the same container after hours of TP/DP
+# benchmarking and could start with insufficient shared-memory capacity.
+# A fresh Docker IPC namespace gives each environment sweep a clean 4 GiB shm.
+if [[ "$SWEEP_RC" -eq 0 && "$ENABLE_ENV_SWEEP" == true ]]; then
+  echo "==> Running final environment sweep in a fresh IPC namespace"
+  set +e
+  docker run --rm \
+    --user "$(id -u):$(id -g)" \
+    --entrypoint bash \
+    --security-opt seccomp=unconfined \
+    --cap-add SYS_NICE \
+    --ipc=private \
+    --shm-size=4g \
+    "${DOCKER_ENV[@]}" \
+    "${TOOLS_MOUNT_ARGS[@]}" \
+    -v "$ROOT/scripts/run_env_sweep.py:/validation-scripts/run_env_sweep.py:ro" \
+    -v "$RESULT_ROOT:/output" \
+    -v "$HF_HOME:/hf-cache" \
+    -w /output \
+    "$VLLM_IMAGE" \
+    -lc '
+      set -euo pipefail
+      mkdir -p "$HOME"
+      echo "Environment sweep /dev/shm availability:"
+      df -h /dev/shm
       python3 /validation-scripts/run_env_sweep.py \
         --sweep-dir /output/sweep \
         --env-file /output/env.sh \
@@ -255,13 +290,11 @@ docker run --rm \
         --seed-concurrency "$SWEEP_CONCURRENCY" \
         --ttft-sla-ms "$SWEEP_TTFT_SLA_MS" \
         --tpot-sla-ms "$SWEEP_TPOT_SLA_MS" \
-        --ready-timeout "$SWEEP_SERVER_READY_TIMEOUT" || SWEEP_RC=$?
-    fi
-
-    exit "$SWEEP_RC"
-  '
-SWEEP_RC=$?
-set -e
+        --ready-timeout "$SWEEP_SERVER_READY_TIMEOUT"
+    '
+  SWEEP_RC=$?
+  set -e
+fi
 
 python3 - "$RESULT_ROOT/sweep-metadata.json" "$SWEEP_RC" <<'PYMETA'
 import json

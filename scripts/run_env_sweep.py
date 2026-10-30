@@ -72,6 +72,7 @@ def html_section(report):
     return ("<section><h2>Environment variable sweep (final stage)</h2>"
             f"<p>{KEY}: selected {html.escape(str(report.get('recommended')))}; "
             f"TP={report['tp']}, concurrency={report['concurrency']}; "
+            f"CPU binding={html.escape(report.get('cpu_binding', 'unknown'))}; "
             "throughput differences within 3% treated as equivalent.</p>"
             "<table border='1'><tr><th>Reserved CPUs</th><th>Status</th>"
             "<th>Output tok/s</th><th>P99 TTFT ms</th><th>P99 TPOT ms</th><th>Error</th></tr>"
@@ -113,6 +114,7 @@ def main():
     output_dir = sweep / "env-sweep"
     output_dir.mkdir(exist_ok=True)
     results = {"variable": KEY, "tp": tp, "concurrency": concurrency,
+               "cpu_binding": "auto", "ipc_isolation": "fresh-docker-container",
                "values": values, "recommended": None, "candidates": [],
                "ttft_sla_ms": args.ttft_sla_ms, "tpot_sla_ms": args.tpot_sla_ms,
                "variance_percent": 3.0}
@@ -130,6 +132,7 @@ def main():
             # The generated recipe env.sh must be loaded before overriding the candidate.
             # Use the same path for CLI and worker subprocesses.
             cmd = (f"source {__import__('shlex').quote(str(args.env_file.resolve()))}; "
+                   "export VLLM_CPU_OMP_THREADS_BIND=auto; "
                    f"export {KEY}={value}; "
                    "cd /vllm-workspace 2>/dev/null || true; "
                    f"exec vllm serve --config {__import__('shlex').quote(str(config_path))}")
