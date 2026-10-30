@@ -17,6 +17,7 @@ def main():
     p.add_argument('--start', required=True, help='UTC ISO timestamp, inclusive')
     p.add_argument('--end', required=True, help='UTC ISO timestamp, exclusive')
     p.add_argument('--output', type=Path, required=True)
+    p.add_argument('--json-output', type=Path, help='Optional machine-readable summary for notifications')
     a = p.parse_args()
     start, end = parse_time(a.start), parse_time(a.end)
     entries = json.loads(a.manifest.read_text())
@@ -28,22 +29,27 @@ def main():
              '| Date (UTC) | Run | Tested | Passed | Failed |', '| --- | --- | ---: | ---: | ---: |']
     totals = [0, 0, 0]
     missing = 0
+    daily = []
     for x in entries:
         url = x.get('url', '')
         label = f"[{x['id']}]({url})" if url.startswith('https://github.com/') else str(x['id'])
         file = Path(x['summary']) if x.get('summary') else None
         if not file or not file.is_file():
             missing += 1
+            daily.append({'date': x['created_at'][:10], 'url': url, 'run_id': str(x['id']), 'status': 'missing'})
             lines.append(f"| {x['created_at'][:10]} | {label} | — | — | Missing artifact |")
             continue
         try:
             data = json.loads(file.read_text())
         except (ValueError, OSError):
             missing += 1
+            daily.append({'date': x['created_at'][:10], 'url': url, 'run_id': str(x['id']), 'status': 'invalid'})
             lines.append(f"| {x['created_at'][:10]} | {label} | — | — | Invalid artifact |")
             continue
         values = [int(data.get(k, 0)) for k in ('tested', 'passed', 'failed')]
         totals = [a + b for a, b in zip(totals, values)]
+        daily.append({'date': x['created_at'][:10], 'url': url, 'run_id': str(x['id']),
+                      'status': 'available', 'tested': values[0], 'passed': values[1], 'failed': values[2]})
         lines.append(f"| {x['created_at'][:10]} | {label} | {values[0]} | {values[1]} | {values[2]} |")
         for m in data.get('models', []):
             name = m.get('model')
@@ -63,6 +69,19 @@ def main():
         lines.append('| — | — | No recorded model failures |')
     lines += ['', '_Failure counts reflect model executions, not unique failed models. Missing summaries are not treated as passes._', '']
     a.output.write_text('\n'.join(lines) + '\n')
+    if a.json_output:
+        report = {
+            'start': start.isoformat(), 'end': end.isoformat(),
+            'scheduled_runs': len(entries), 'missing_summaries': missing,
+            'tested': totals[0], 'passed': totals[1], 'failed': totals[2],
+            'runs': daily,
+            'failed_models': [
+                {'model': name, 'failed_nights': s['fail'],
+                 'tested_nights': sum(s.values()), 'passed_nights': s['pass']}
+                for name, s in sorted(failed_models, key=lambda item: (-item[1]['fail'], item[0]))
+            ],
+        }
+        a.json_output.write_text(json.dumps(report, indent=2) + '\n')
 
 
 if __name__ == '__main__':
