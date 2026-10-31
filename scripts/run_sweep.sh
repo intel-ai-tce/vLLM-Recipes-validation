@@ -218,19 +218,19 @@ docker run --rm \
     set +e
     case "$SWEEP_STAGE" in
       all)
-        bash ./run_full_sweep.sh --server-ready-timeout "$SWEEP_SERVER_READY_TIMEOUT"
+        bash ./run_full_sweep.sh --server-ready-timeout "$SWEEP_SERVER_READY_TIMEOUT" --continue-on-error
         SWEEP_RC=$?
         ;;
       parallel-layout)
-        bash ./run_parallel_layout_sweep.sh --server-ready-timeout "$SWEEP_SERVER_READY_TIMEOUT" && python3 ./recommend_parallel_layout.py
+        bash ./run_parallel_layout_sweep.sh --server-ready-timeout "$SWEEP_SERVER_READY_TIMEOUT" --continue-on-error && python3 ./recommend_parallel_layout.py
         SWEEP_RC=$?
         ;;
       concurrency)
-        bash ./run_concurrency_sweep.sh --server-ready-timeout "$SWEEP_SERVER_READY_TIMEOUT" && python3 ./recommend_concurrency.py
+        bash ./run_concurrency_sweep.sh --server-ready-timeout "$SWEEP_SERVER_READY_TIMEOUT" --continue-on-error && python3 ./recommend_concurrency.py
         SWEEP_RC=$?
         ;;
       scheduler)
-        if bash ./run_sweep.sh --server-ready-timeout "$SWEEP_SERVER_READY_TIMEOUT" && python3 ./recommend.py; then
+        if bash ./run_sweep.sh --server-ready-timeout "$SWEEP_SERVER_READY_TIMEOUT" --continue-on-error && python3 ./recommend.py; then
           SWEEP_RC=0
         elif [[ -f concurrency-recommendation.json && -f parallel-layout-config.yml &&
                 -f ./scheduler_fallback.py ]]; then
