@@ -2,8 +2,9 @@ name: Weekly Xeon 6 Recipe Validation
 
 on:
   schedule:
-    # 05:00 UTC Monday. Adjust for your preferred Intel-site maintenance window.
-    - cron: "0 5 * * 1"
+    # Every Sunday at 1:00 AM Pacific Time, automatically adjusting for PST/PDT.
+    - cron: "0 1 * * 0"
+      timezone: "America/Los_Angeles"
   workflow_dispatch:
     inputs:
       model:
