@@ -109,8 +109,10 @@ def main() -> int:
         "recipe_tools": recipe_tools,
         "hardware": args.hardware,
         "tested": len(rows),
+        "attempted": sum(r.get("status") != "SKIP" for r in rows),
         "passed": sum(r.get("status") == "PASS" for r in rows),
-        "failed": sum(r.get("status") != "PASS" for r in rows),
+        "failed": sum(r.get("status") not in ("PASS", "SKIP") for r in rows),
+        "skipped": sum(r.get("status") == "SKIP" for r in rows),
         "models": rows,
     }
     latest_json = results_root / "weekly-summary.json"
@@ -121,7 +123,7 @@ def main() -> int:
         status = r.get("status", "FAIL")
         m = r.get("metrics", {})
         stages = r.get("stages", {})
-        error = html.escape(str(r.get("error", ""))) or "-"
+        error = html.escape(str(r.get("skip_reason") if status == "SKIP" else r.get("error", ""))) or "-"
         trs.append(
             "<tr>"
             f"<td><code>{html.escape(r['model'])}</code></td>"
@@ -144,7 +146,7 @@ body{{font-family:system-ui,sans-serif;margin:2rem;color:#1f2328}}
 table{{border-collapse:collapse;width:100%;font-size:.92rem}}
 th,td{{border:1px solid #d0d7de;padding:.5rem;text-align:left;vertical-align:top}}
 th{{background:#f6f8fa;position:sticky;top:0}}
-.pass{{color:#1a7f37;font-weight:700}} .fail{{color:#cf222e;font-weight:700}}
+.pass{{color:#1a7f37;font-weight:700}} .fail{{color:#cf222e;font-weight:700}} .skip{{color:#8250df;font-weight:700}}
 .error{{max-width:36rem;word-break:break-word}} code{{font-family:ui-monospace,monospace}}
 </style></head><body>
 <h1>{html.escape(args.hardware)} Recipe Validation</h1>

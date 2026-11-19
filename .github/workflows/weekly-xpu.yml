@@ -41,6 +41,10 @@ on:
         description: 'Optional nonsecret KEY=VALUE overrides passed to containers'
         required: false
         default: ''
+      skip_models:
+        description: 'Comma/space-separated model IDs to SKIP without running'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -63,6 +67,7 @@ jobs:
       RECIPES_BASE_URL: ${{ inputs.recipe_api_base || 'https://recipes.vllm.ai' }}
       VLLM_TEST_ENV_VARS: ${{ inputs.vllm_env_vars || '' }}
       TEST_MODEL: ${{ inputs.model || '' }}
+      SKIP_MODELS: ${{ inputs.skip_models || '' }}
       HF_HOME: ${{ vars.HF_HOME }}
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       BENCH_NUM_PROMPTS: '20'
@@ -126,12 +131,12 @@ jobs:
                    f"**Recipe API:** `{os.environ['RECIPES_BASE_URL']}`", '']
           if p.exists():
               data = json.loads(p.read_text())
-              lines += [f"**Tested:** {data['tested']} · **Passed:** {data['passed']} · **Failed:** {data['failed']}", '',
+              lines += [f"**Discovered:** {data['tested']} · **Attempted:** {data.get('attempted', data['tested'] - data.get('skipped', 0))} · **Passed:** {data['passed']} · **Failed:** {data['failed']} · **Skipped:** {data.get('skipped', 0)}", '',
                         '| Model | Status | P99 TTFT ms | P99 TPOT ms | Output tok/s | Error |',
                         '| --- | --- | ---: | ---: | ---: | --- |']
               for r in data['models']:
                   m = r.get('metrics') or {}
-                  err = str(r.get('error', '')).replace('|', '\\|').replace('\n', ' ')[:140]
+                  err = str(r.get('skip_reason') if r.get('status') == 'SKIP' else r.get('error', '')).replace('|', '\\|').replace('\n', ' ')[:140]
                   lines.append(f"| `{r['model']}` | {r.get('status','-')} | {m.get('p99_ttft_ms','-')} | {m.get('p99_tpot_ms','-')} | {m.get('output_throughput','-')} | {err or '-'} |")
           else:
               lines.append('No summary produced; see workflow logs and artifacts.')

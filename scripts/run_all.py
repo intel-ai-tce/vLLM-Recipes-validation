@@ -33,6 +33,8 @@ def main() -> int:
     ap.add_argument("--server-timeout", type=int, default=3600)
     ap.add_argument("--bench-timeout", type=int, default=1800)
     ap.add_argument("--only", action="append", help="Test only exact model ID; repeatable")
+    ap.add_argument("--skip", action="append", default=[],
+                    help="Exact model ID to mark SKIP without starting a container")
     args = ap.parse_args()
 
     discovery = json.loads(Path(args.discovery).read_text())
@@ -50,10 +52,29 @@ def main() -> int:
             return 2
 
     runner = Path(__file__).with_name("run_one_model.py")
+    skipped_ids = set(args.skip)
+    skipped_ids.update(os.environ.get("SKIP_MODELS", "").replace(",", " ").split())
     failures = []
+    skipped = []
     for i, item in enumerate(models, start=1):
         model = item["hf_id"]
         print(f"\n===== [{i}/{len(models)}] {model} =====", flush=True)
+        if model in skipped_ids:
+            reason = "Explicitly excluded from this validation run"
+            destination = Path(args.result_root) / model.replace("/", "__")
+            destination.mkdir(parents=True, exist_ok=True)
+            (destination / "result.json").write_text(json.dumps({
+                "model": model,
+                "hardware": args.hardware,
+                "recipe_url": item.get("recipe_url"),
+                "status": "SKIP",
+                "skip_reason": reason,
+                "stages": {"preflight": "SKIP"},
+                "metrics": {},
+            }, indent=2) + "\n")
+            skipped.append(model)
+            print(f"SKIP: {model} ({reason})", flush=True)
+            continue
         cmd = [
             sys.executable,
             str(runner),
@@ -101,9 +122,12 @@ def main() -> int:
 
     summary = {
         "tested": len(models),
-        "passed": len(models) - len(failures),
+        "attempted": len(models) - len(skipped),
+        "passed": len(models) - len(failures) - len(skipped),
         "failed": len(failures),
+        "skipped": len(skipped),
         "failed_models": failures,
+        "skipped_models": skipped,
     }
     Path(args.result_root).mkdir(parents=True, exist_ok=True)
     (Path(args.result_root) / "run_summary.json").write_text(
