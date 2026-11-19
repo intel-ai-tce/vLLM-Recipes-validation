@@ -114,7 +114,18 @@ def main() -> int:
         if args.vllm_dir:
             cmd.extend(["--vllm-dir", args.vllm_dir])
         rc = subprocess.run(cmd, env=os.environ.copy()).returncode
-        if rc:
+        result_path = Path(args.result_root) / model.replace("/", "__") / "result.json"
+        try:
+            model_result = json.loads(result_path.read_text())
+        except (OSError, ValueError):
+            model_result = {}
+        if model_result.get("status") == "SKIP":
+            skipped.append(model)
+            print(
+                f"SKIP: {model} ({model_result.get('skip_reason', 'unsupported')})",
+                flush=True,
+            )
+        elif rc or model_result.get("status") != "PASS":
             failures.append(model)
             print(f"FAIL: {model}", file=sys.stderr)
         else:

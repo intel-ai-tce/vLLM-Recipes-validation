@@ -417,6 +417,14 @@ def main() -> int:
         "/validation",
     ]
 
+    # Same container / same converter run: Recipes checks feasibility before
+    # serve_with_recipe.sh starts vLLM. No CI-side TP/PP/DP parser is needed.
+    validation_status_path = work / "recipe-validation-status.json"
+    if args.hardware != "xeon6" and recipes_dir is not None:
+        docker_cmd.extend([
+            "-e", "RECIPE_VALIDATION_RESULT_OUT=/validation/recipe-validation-status.json"
+        ])
+
     # Intel XPU needs DRM render nodes exposed inside the vLLM container.
     if args.hardware != "xeon6":
         drm = Path("/dev/dri")
@@ -505,6 +513,26 @@ def main() -> int:
         conversion_ok = config_path.is_file() and env_path.is_file()
         result["stages"]["conversion"] = "PASS" if conversion_ok else "FAIL"
         copy_candidates(work, result_dir)
+
+        if validation_status_path.exists():
+            try:
+                validation_status = json.loads(validation_status_path.read_text())
+                shutil.copy2(
+                    validation_status_path,
+                    result_dir / "recipe-validation-status.json",
+                )
+            except (OSError, ValueError) as exc:
+                validation_status = {"status": "ERROR", "reason": str(exc)}
+            result["recipe_validation"] = validation_status
+            if not ready and validation_status.get("status") == "SKIP":
+                result["status"] = "SKIP"
+                result["skip_reason"] = validation_status.get(
+                    "reason", "Recipe tool reported unsupported deployment"
+                )
+                result["stages"]["preflight"] = "SKIP"
+                result["stages"]["startup"] = "SKIP"
+                result["stages"]["conversion"] = "SKIP"
+                return 0
 
         if not ready:
             result["stages"]["startup"] = "FAIL"
