@@ -19,6 +19,7 @@ def main() -> int:
     ap.add_argument("--run-id", required=True)
     ap.add_argument("--run-date", required=True)
     ap.add_argument("--recipe-tools-metadata", required=True)
+    ap.add_argument("--hardware", default="xeon6")
     args = ap.parse_args()
 
     recipe_tools = json.loads(Path(args.recipe_tools_metadata).read_text())
@@ -81,7 +82,7 @@ def main() -> int:
                 json.dumps(validation, indent=2) + "\n"
             )
             (tmp / "README.md").write_text(
-                f"# {model} — Xeon 6 validated configuration\n\n"
+                f"# {model} — {args.hardware} validated configuration\n\n"
                 f"Last validated: {validation['validated_at']}\n\n"
                 f"Validation run: `{args.run_date}/{args.run_id}`\n\n"
                 f"Recipe tools source: `{recipe_tools['source']}`\n\n"
@@ -106,6 +107,7 @@ def main() -> int:
         "run_date": args.run_date,
         "history_path": f"history/{args.run_date}/{args.run_id}",
         "recipe_tools": recipe_tools,
+        "hardware": args.hardware,
         "tested": len(rows),
         "passed": sum(r.get("status") == "PASS" for r in rows),
         "failed": sum(r.get("status") != "PASS" for r in rows),
@@ -134,7 +136,7 @@ def main() -> int:
             "</tr>"
         )
     page = f"""<!doctype html>
-<html><head><meta charset='utf-8'><title>Xeon 6 Recipe Validation — {html.escape(args.run_id)}</title>
+<html><head><meta charset='utf-8'><title>{html.escape(args.hardware)} Recipe Validation — {html.escape(args.run_id)}</title>
 <style>
 body{{font-family:system-ui,sans-serif;margin:2rem;color:#1f2328}}
 .summary{{display:flex;gap:1rem;flex-wrap:wrap;margin:1rem 0}}
@@ -145,7 +147,7 @@ th{{background:#f6f8fa;position:sticky;top:0}}
 .pass{{color:#1a7f37;font-weight:700}} .fail{{color:#cf222e;font-weight:700}}
 .error{{max-width:36rem;word-break:break-word}} code{{font-family:ui-monospace,monospace}}
 </style></head><body>
-<h1>Xeon 6 Recipe Validation</h1>
+<h1>{html.escape(args.hardware)} Recipe Validation</h1>
 <p>Run: <code>{html.escape(args.run_id)}</code> &nbsp; Date: <code>{html.escape(args.run_date)}</code><br>
 Recipe tools source: <code>{html.escape(recipe_tools["source"])}</code><br>
 Repository: <code>{html.escape(recipe_tools.get("repository") or "image-bundled")}</code><br>

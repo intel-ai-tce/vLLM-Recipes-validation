@@ -366,7 +366,7 @@ def main() -> int:
     # Keep names short and deterministic while avoiding collisions with stale
     # containers from another model.
     model_hash = hashlib.sha1(args.model.encode()).hexdigest()[:12]
-    container = f"xeon-recipe-{model_hash}-{os.getpid()}"
+    container = f"recipe-{model_hash}-{os.getpid()}"
     base_url = f"http://{args.host}:{args.port}"
     server_log_path = result_dir / "server.log"
 
@@ -416,6 +416,16 @@ def main() -> int:
         "-w",
         "/validation",
     ]
+
+    # Intel XPU needs DRM render nodes exposed inside the vLLM container.
+    if args.hardware != "xeon6":
+        drm = Path("/dev/dri")
+        if not drm.is_dir() or not list(drm.glob("renderD*")):
+            result["stages"]["container_start"] = "FAIL"
+            result["error"] = "No /dev/dri/renderD* on the selected XPU runner"
+            write_result(result_path, result)
+            return 1
+        docker_cmd.extend(["--device", "/dev/dri:/dev/dri"])
 
     # Optional Triton runtime tracing for the dedicated inspection workflow.
     # sitecustomize is loaded in each Python interpreter (including spawned

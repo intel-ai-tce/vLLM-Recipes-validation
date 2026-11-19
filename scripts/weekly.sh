@@ -17,7 +17,7 @@ if ! docker info >/dev/null 2>&1; then
   exit 2
 fi
 
-echo "==> Pulling official vLLM CPU image: $VLLM_IMAGE"
+echo "==> Pulling vLLM image: $VLLM_IMAGE"
 docker pull "$VLLM_IMAGE"
 
 # A fresh checkout fetches the requested remote ref on every run, even on a
@@ -68,9 +68,20 @@ Path(out).write_text(json.dumps({
 }, indent=2) + "\n")
 PYMETA
 
-python3 "$ROOT/scripts/discover_xeon6_models.py" \
+python3 "$ROOT/scripts/discover_hardware_models.py" \
+  --hardware "$HARDWARE" \
   --base-url "$RECIPES_BASE_URL" \
   --output "$RESULT_ROOT/discovery.json"
+
+# Fail early rather than reporting a successful zero-model run.
+python3 - "$RESULT_ROOT/discovery.json" <<'PYCHECK'
+import json
+import sys
+from pathlib import Path
+info = json.loads(Path(sys.argv[1]).read_text())
+if not info.get("count"):
+    sys.exit(f"ERROR: No recipes discovered for hardware {info.get('hardware')}")
+PYCHECK
 
 ONLY_ARGS=()
 if [[ -n "$TEST_MODEL" ]]; then
@@ -112,11 +123,12 @@ done
 
 python3 "$ROOT/scripts/promote_and_report.py" \
   --results "$RESULT_ROOT/models" \
-  --validated "$VALIDATED_ROOT/xeon6" \
+  --validated "$VALIDATED_ROOT/$HARDWARE" \
   --history "$ROOT/history" \
   --run-id "$RUN_ID" \
   --run-date "$RUN_DATE" \
-  --recipe-tools-metadata "$RESULT_ROOT/recipe-tools.json"
+  --recipe-tools-metadata "$RESULT_ROOT/recipe-tools.json" \
+  --hardware "$HARDWARE"
 
 cp "$RESULT_ROOT/discovery.json" "$HISTORY_DIR/discovery.json"
 cp "$RESULT_ROOT/system-info.txt" "$HISTORY_DIR/system-info.txt"

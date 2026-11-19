@@ -1,0 +1,173 @@
+name: Weekly Intel XPU Recipe Validation
+
+on:
+  schedule:
+    # Default scheduled target: B70, every Sunday 02:00 Pacific (DST-aware).
+    - cron: '0 2 * * 0'
+      timezone: America/Los_Angeles
+  workflow_dispatch:
+    inputs:
+      hardware:
+        description: 'Recipes hardware identifier (e.g. arc_pro_b70, arc_pro_b60, d270)'
+        required: true
+        default: arc_pro_b70
+        type: string
+      runner_labels:
+        description: 'JSON array of runner labels; select runner equipped with target GPU'
+        required: true
+        default: '["self-hosted","Linux","X64","recipe-validation","local","b70"]'
+        type: string
+      model:
+        description: 'Optional exact model ID; blank validates all recipes for hardware'
+        required: false
+        default: ''
+      vllm_image:
+        description: 'XPU-enabled vLLM Docker image'
+        required: true
+        default: 'vllm/vllm-openai-xpu:latest'
+      recipe_tools_repo:
+        description: 'Git clone URL for vLLM repo containing tools/recipes'
+        required: true
+        default: 'https://github.com/intel-ai-tce/vllm.git'
+      recipe_tools_ref:
+        description: 'Tools branch, tag, or commit; checked out fresh each run'
+        required: true
+        default: xpu_vllm_recipes_tool
+      recipe_api_base:
+        description: 'Recipe JSON API base (supports preview URLs)'
+        required: false
+        default: 'https://recipes.vllm.ai'
+      vllm_env_vars:
+        description: 'Optional nonsecret KEY=VALUE overrides passed to containers'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: weekly-xpu-${{ inputs.hardware || 'arc_pro_b70' }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    # Scheduled runs use B70 labels. Dispatchers can target B60/D270 runners.
+    runs-on: ${{ fromJSON(inputs.runner_labels || '["self-hosted","Linux","X64","recipe-validation","local","b70"]') }}
+    timeout-minutes: 10080
+    env:
+      HARDWARE: ${{ inputs.hardware || 'arc_pro_b70' }}
+      VALIDATED_BRANCH: validated-${{ inputs.hardware || 'arc_pro_b70' }}
+      RECIPE_TOOLS_REPO: ${{ inputs.recipe_tools_repo || 'https://github.com/intel-ai-tce/vllm.git' }}
+      RECIPE_TOOLS_REF: ${{ inputs.recipe_tools_ref || 'xpu_vllm_recipes_tool' }}
+      VLLM_IMAGE: ${{ inputs.vllm_image || 'vllm/vllm-openai-xpu:latest' }}
+      RECIPES_BASE_URL: ${{ inputs.recipe_api_base || 'https://recipes.vllm.ai' }}
+      VLLM_TEST_ENV_VARS: ${{ inputs.vllm_env_vars || '' }}
+      TEST_MODEL: ${{ inputs.model || '' }}
+      HF_HOME: ${{ vars.HF_HOME }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      BENCH_NUM_PROMPTS: '20'
+      VALIDATION_RUN_ID: run-${{ github.run_number }}-attempt-${{ github.run_attempt }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Validate hardware and source inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$HARDWARE" =~ ^[a-z][a-z0-9_]*$ ]] || { echo 'Invalid hardware identifier'; exit 2; }
+          [[ -n "$RECIPE_TOOLS_REPO" && -n "$RECIPE_TOOLS_REF" ]] || { echo 'Recipe tools repo/ref required'; exit 2; }
+          [[ -d /dev/dri ]] && compgen -G '/dev/dri/renderD*' >/dev/null || {
+            echo 'No GPU render node detected under /dev/dri'; exit 2;
+          }
+          echo "Hardware selector: $HARDWARE"
+          ls -l /dev/dri
+          command -v xpu-smi >/dev/null && xpu-smi discovery || true
+          docker info >/dev/null
+
+      - name: Initialize isolated scratch and HF cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          scratch="$RUNNER_TEMP/xpu-${HARDWARE}-${{ github.run_id }}-${{ github.run_attempt }}"
+          mkdir -p "$scratch/work" "$scratch/results"
+          echo "WORK_ROOT=$scratch/work" >> "$GITHUB_ENV"
+          echo "RESULT_ROOT=$scratch/results" >> "$GITHUB_ENV"
+          cache="${HF_HOME:-$HOME/.cache/huggingface}"
+          [[ "$cache" = /* ]] || { echo 'HF_HOME must be absolute'; exit 2; }
+          mkdir -p "$cache"
+          cache="$(readlink -f "$cache")"
+          touch "$cache/.validation-write-test" && rm "$cache/.validation-write-test"
+          echo "HF_HOME=$cache" >> "$GITHUB_ENV"
+          df -h "$cache"
+
+      - name: Restore previously validated catalog for hardware
+        run: ./scripts/hydrate_validated.sh
+
+      - name: Validate Recipes for selected XPU hardware
+        id: test
+        continue-on-error: true
+        run: ./scripts/weekly.sh
+
+      - name: Show XPU validation summary
+        if: always()
+        shell: bash
+        run: |
+          python3 <<'PY'
+          import json, os
+          from pathlib import Path
+          out = Path(os.environ['GITHUB_STEP_SUMMARY'])
+          hardware = os.environ['HARDWARE']
+          result = Path(os.environ.get('RESULT_ROOT', '/nonexistent'))
+          p = result / 'weekly-summary.json'
+          lines = [f'# {hardware} Recipe Validation', '',
+                   f"**Image:** `{os.environ['VLLM_IMAGE']}`  ",
+                   f"**Tools:** `{os.environ['RECIPE_TOOLS_REPO']}` @ `{os.environ['RECIPE_TOOLS_REF']}`  ",
+                   f"**Recipe API:** `{os.environ['RECIPES_BASE_URL']}`", '']
+          if p.exists():
+              data = json.loads(p.read_text())
+              lines += [f"**Tested:** {data['tested']} · **Passed:** {data['passed']} · **Failed:** {data['failed']}", '',
+                        '| Model | Status | P99 TTFT ms | P99 TPOT ms | Output tok/s | Error |',
+                        '| --- | --- | ---: | ---: | ---: | --- |']
+              for r in data['models']:
+                  m = r.get('metrics') or {}
+                  err = str(r.get('error', '')).replace('|', '\\|').replace('\n', ' ')[:140]
+                  lines.append(f"| `{r['model']}` | {r.get('status','-')} | {m.get('p99_ttft_ms','-')} | {m.get('p99_tpot_ms','-')} | {m.get('output_throughput','-')} | {err or '-'} |")
+          else:
+              lines.append('No summary produced; see workflow logs and artifacts.')
+          out.write_text('\n'.join(lines)+'\n')
+          PY
+
+      - name: Upload validation evidence
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: xpu-${{ env.HARDWARE }}-weekly-${{ github.run_number }}
+          path: |
+            ${{ env.RESULT_ROOT }}/
+            history/**/${{ env.VALIDATION_RUN_ID }}/
+          retention-days: 90
+
+      - name: Publish known-good catalog
+        if: always() && steps.test.outcome != 'skipped'
+        run: ./scripts/publish_validated.sh
+
+      - name: Restore scratch ownership and remove scratch
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          if docker image inspect "$VLLM_IMAGE" >/dev/null 2>&1; then
+            for dir in "${WORK_ROOT:-}" "${RESULT_ROOT:-}"; do
+              [[ -d "$dir" ]] || continue
+              docker run --rm --user 0:0 --entrypoint /bin/sh \
+                -v "$dir:/repair" "$VLLM_IMAGE" \
+                -c 'chown -R "$1:$2" /repair' _ "$(id -u)" "$(id -g)"
+            done
+          fi
+          [[ -n "${WORK_ROOT:-}" ]] && rm -rf -- "$WORK_ROOT"
+          [[ -n "${RESULT_ROOT:-}" ]] && rm -rf -- "$RESULT_ROOT"
+
+      - name: Mark failed model validation
+        if: steps.test.outcome == 'failure'
+        run: exit 1

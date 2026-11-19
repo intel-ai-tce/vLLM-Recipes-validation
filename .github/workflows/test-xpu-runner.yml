@@ -1,0 +1,76 @@
+name: Test XPU Runner
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner_labels:
+        description: 'Runner labels as a JSON array (B70 defaults, override for B60/D270)'
+        type: string
+        required: true
+        default: '["self-hosted","Linux","X64","recipe-validation","local","b70"]'
+
+permissions:
+  contents: read
+
+jobs:
+  test-runner:
+    runs-on: ${{ fromJSON(inputs.runner_labels) }}
+    timeout-minutes: 15
+    steps:
+      - name: Basic system info
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '=== Hostname / kernel ==='
+          hostname
+          uname -a
+          echo '=== CPU / NUMA / memory ==='
+          lscpu
+          numactl -H || true
+          free -h
+
+      - name: Check tools
+        shell: bash
+        run: |
+          echo '=== Python / Git / Docker ==='
+          python3 --version
+          git --version
+          docker --version
+          docker info --format '{{.ServerVersion}}' || true
+          echo '=== Intel XPU management tools ==='
+          command -v xpu-smi || true
+          command -v sycl-ls || true
+          command -v clinfo || true
+
+      - name: Check GPU PCI and DRM devices
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '=== Intel PCI devices ==='
+          if command -v lspci >/dev/null; then lspci -nn | grep -iE 'Intel.*(VGA|Display|3D)' || true; fi
+          echo '=== DRM device nodes ==='
+          ls -la /dev/dri/ || true
+          echo '=== DRM render nodes ==='
+          compgen -G '/dev/dri/renderD*' || { echo '::error::No DRM render nodes present'; exit 1; }
+          echo '=== xpu-smi discovery ==='
+          if command -v xpu-smi >/dev/null; then xpu-smi discovery; else echo '::warning::xpu-smi not installed'; fi
+
+      - name: Verify Docker can access DRM render nodes
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker info >/dev/null
+          # Docker access check without pulling a vLLM image or model.
+          # A locally available Linux image is used to avoid network dependency.
+          image="$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -m1 -v '<none>' || true)"
+          if [[ -z "$image" ]]; then
+            echo '::warning::No local image found; Docker daemon and host devices verified, skipping container check'
+            exit 0
+          fi
+          echo "Local image: $image"
+          # The image may lack /bin/sh; report as warning instead of masking device status.
+          if docker run --rm --device /dev/dri:/dev/dri --entrypoint /bin/sh "$image" -c 'ls -l /dev/dri/renderD*'; then
+            echo 'Docker DRM access: PASS'
+          else
+            echo '::warning::Container device test failed; verify image shell and Docker GPU permissions'
+          fi
