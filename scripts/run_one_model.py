@@ -413,6 +413,9 @@ def main() -> int:
         "HF_HOME=/hf-cache",
         "-e",
         "HF_HUB_CACHE=/hf-cache/hub",
+        # Share approved parser assets across model runs without changing Recipes.
+        "-e",
+        "RECIPE_ASSET_CACHE_DIR=/hf-cache/recipe-assets",
         "-w",
         "/validation",
     ]
