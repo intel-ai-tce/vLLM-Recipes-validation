@@ -71,6 +71,11 @@ jobs:
       HF_HOME: ${{ vars.HF_HOME }}
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       BENCH_NUM_PROMPTS: '20'
+      # Match Xeon major-version timeouts for large checkpoints on CIFS.
+      # The Rust frontend otherwise times out registering the engine after 600s.
+      VLLM_ENGINE_READY_TIMEOUT_S: '1800'
+      # Allow the external health check to outlast model initialization.
+      SERVER_START_TIMEOUT_SEC: '7200'
       VALIDATION_RUN_ID: run-${{ github.run_number }}-attempt-${{ github.run_attempt }}
 
     steps:
