@@ -12,11 +12,14 @@ on:
         required: true
         default: arc_pro_b70
         type: string
-      runner_labels:
-        description: 'JSON array of runner labels; select runner equipped with target GPU'
+      runner_tag:
+        description: 'Select B70 runner: 3c (3 GPUs) or 4c (4 GPUs)'
         required: true
-        default: '["self-hosted","Linux","X64","recipe-validation","local","b70"]'
-        type: string
+        type: choice
+        options:
+          - 3c
+          - 4c
+        default: 3c
       model:
         description: 'Optional exact model ID; blank validates all recipes for hardware'
         required: false
@@ -55,8 +58,8 @@ concurrency:
 
 jobs:
   validate:
-    # Scheduled runs use B70 labels. Dispatchers can target B60/D270 runners.
-    runs-on: ${{ fromJSON(inputs.runner_labels || '["self-hosted","Linux","X64","recipe-validation","local","b70"]') }}
+    # Scheduled runs default to the 3-card B70 runner; manual runs can select 4c.
+    runs-on: [self-hosted, Linux, X64, recipe-validation, local, b70, "${{ inputs.runner_tag || '3c' }}"]
     timeout-minutes: 10080
     env:
       HARDWARE: ${{ inputs.hardware || 'arc_pro_b70' }}

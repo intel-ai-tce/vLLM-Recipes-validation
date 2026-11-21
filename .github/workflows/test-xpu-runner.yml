@@ -3,18 +3,21 @@ name: Test XPU Runner
 on:
   workflow_dispatch:
     inputs:
-      runner_labels:
-        description: 'Runner labels as a JSON array (B70 defaults, override for B60/D270)'
-        type: string
+      runner_tag:
+        description: 'Select B70 runner: 3c (3 GPUs) or 4c (4 GPUs)'
+        type: choice
         required: true
-        default: '["self-hosted","Linux","X64","recipe-validation","local","b70"]'
+        options:
+          - 3c
+          - 4c
+        default: 3c
 
 permissions:
   contents: read
 
 jobs:
   test-runner:
-    runs-on: ${{ fromJSON(inputs.runner_labels) }}
+    runs-on: [self-hosted, Linux, X64, recipe-validation, local, b70, "${{ inputs.runner_tag || '3c' }}"]
     timeout-minutes: 15
     steps:
       - name: Basic system info
