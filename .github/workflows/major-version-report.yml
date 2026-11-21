@@ -31,9 +31,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 -m unittest discover -s scripts -p 'test_compare_major.py' -v
+          python3 -m unittest discover -s scripts -p 'test_compare_major*.py' -v
           python3 scripts/compare_major.py \
-            --repo "$GH_REPO" --output-dir "$RUNNER_TEMP/major-comparison"
+            --repo "$GH_REPO" --output-dir "$RUNNER_TEMP/major-comparison" --allow-tool-source-change
           cat "$RUNNER_TEMP/major-comparison/latest.md" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish major comparison to report branch

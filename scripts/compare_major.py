@@ -113,19 +113,61 @@ def hardware(system_info: str) -> dict:
     return result
 
 
-def compatible(first: dict, second: dict) -> bool:
+def common_workloads_match(first: dict, second: dict) -> bool:
+    """Verify observed benchmark policy for every model measured in both runs.
+
+    A source change is not proof that the recipe-tool implementations are
+    identical. This is a narrowly scoped, opt-in observational comparison.
+    """
+    old = {row["model"]: row for row in first["summary"]["models"]}
+    new = {row["model"]: row for row in second["summary"]["models"]}
+    comparable = [model for model in old.keys() & new.keys()
+                  if old[model].get("status") == "PASS"
+                  and new[model].get("status") == "PASS"]
+    if not comparable:
+        return False
+    for model in comparable:
+        a, b = old[model], new[model]
+        if not a.get("workload") or not b.get("workload"):
+            return False
+        if a["workload"] != b["workload"]:
+            return False
+        if not a.get("benchmark_profile") or not b.get("benchmark_profile"):
+            return False
+        if a["benchmark_profile"] != b["benchmark_profile"]:
+            return False
+        if a.get("benchmark_trust_remote_code") != b.get("benchmark_trust_remote_code"):
+            return False
+    return True
+
+
+def compatible(first: dict, second: dict, *, allow_tool_source_change: bool = False) -> bool:
     a, b = first["metadata"], second["metadata"]
     # Never bypass the warmup check, including for legacy metadata.
     if str(a.get("bench_num_warmups", "0")) != str(b.get("bench_num_warmups", "0")):
         return False
     # Other settings in legacy runs may be unverified, so check model IDs.
     if a.get("legacy_inferred") or b.get("legacy_inferred"):
+        if allow_tool_source_change:
+            return False  # An opt-in exception requires auditable metadata.
         return ({row["model"] for row in first["summary"]["models"]} ==
                 {row["model"] for row in second["summary"]["models"]})
-    return settings(a) == settings(b)
+    if settings(a) == settings(b):
+        return True
+    if not allow_tool_source_change:
+        return False
+    # Only repo/ref may differ. Never relax API, env, prompts, or warmups.
+    for key in ("recipe_api_base", "vllm_env_vars", "bench_num_prompts"):
+        if str(a.get(key, "")) != str(b.get(key, "")):
+            return False
+    source_a = (first["summary"].get("recipe_tools") or {}).get("source")
+    source_b = (second["summary"].get("recipe_tools") or {}).get("source")
+    if {source_a, source_b} != {"github", "image"}:
+        return False
+    return common_workloads_match(first, second)
 
 
-def select_pair(candidates: list[dict]) -> tuple[dict, dict]:
+def select_pair(candidates: list[dict], *, allow_tool_source_change: bool = False) -> tuple[dict, dict]:
     """Use newest eligible highest release and newest compatible lower run.
 
     GitHub artifacts are supplied newest first. Preserve ALL eligible attempts
@@ -147,7 +189,8 @@ def select_pair(candidates: list[dict]) -> tuple[dict, dict]:
         if baseline_version >= candidate_version:
             continue
         for baseline in by_release[baseline_version]:
-            if compatible(baseline, candidate):
+            if compatible(baseline, candidate,
+                          allow_tool_source_change=allow_tool_source_change):
                 return baseline, candidate
             print(f"Skipping baseline {baseline['summary'].get('run_id')}: "
                   "incompatible benchmark policy or model catalog")
@@ -225,6 +268,36 @@ def candidates_from_github(repo: str, limit: int) -> list[dict]:
     return found
 
 
+def tool_source_warning(baseline: dict, candidate: dict) -> str | None:
+    """Explicitly identify comparisons involving different recipe-tool sources."""
+    a = baseline["summary"].get("recipe_tools") or {}
+    b = candidate["summary"].get("recipe_tools") or {}
+    if a.get("source") == b.get("source"):
+        return None
+    return ("Recipe tooling source differs: baseline "
+            f"{a.get('source', 'unknown')} ({a.get('repository') or 'image-bundled'}, "
+            f"commit {a.get('commit') or 'not recorded'}); candidate "
+            f"{b.get('source', 'unknown')} ({b.get('repository') or 'image-bundled'}, "
+            f"commit {b.get('commit') or 'not recorded'}). "
+            "Shared passing models have matching recorded workloads and benchmark "
+            "profiles; tool implementation equivalence is NOT established. "
+            "Interpret performance differences as observational, not release-only effects.")
+
+
+def comparison_coverage(baseline: dict, candidate: dict) -> str:
+    old = {row["model"]: row for row in baseline["summary"]["models"]}
+    new = {row["model"]: row for row in candidate["summary"]["models"]}
+    passed = sum(old[m].get("status") == "PASS" and new[m].get("status") == "PASS"
+                 for m in old.keys() & new.keys())
+    fixed = sum(old[m].get("status") != "PASS" and new[m].get("status") == "PASS"
+                for m in old.keys() & new.keys())
+    regressed = sum(old[m].get("status") == "PASS" and new[m].get("status") != "PASS"
+                    for m in old.keys() & new.keys())
+    return (f"Models passing both releases: {passed}; recovered: {fixed}; "
+            f"validation regressions: {regressed}; new: {len(new.keys() - old.keys())}; "
+            f"removed: {len(old.keys() - new.keys())}.")
+
+
 def generate(baseline: dict, candidate: dict, repo: str, output: Path) -> None:
     bv = "v" + ".".join(map(str, release(baseline["metadata"]["version"])))
     cv = "v" + ".".join(map(str, release(candidate["metadata"]["version"])))
@@ -237,6 +310,11 @@ def generate(baseline: dict, candidate: dict, repo: str, output: Path) -> None:
                 .replace("| Previous | Latest |", "| Baseline | Candidate |")
                 .replace("| Model | Previous | Latest |", "| Model | Baseline | Candidate |")
                 .replace("Not tested in latest", "Not tested in candidate"))
+    coverage = comparison_coverage(baseline, candidate)
+    document += "\n## Major-version comparison coverage\n\n" + coverage + "\n"
+    warning = tool_source_warning(baseline, candidate)
+    if warning:
+        document += "\n⚠️ **Benchmark tooling caveat:** " + warning + "\n"
     old_hw = baseline.get("hardware") or {}
     new_hw = candidate.get("hardware") or {}
     hw_fields = ("Model name", "Architecture", "CPU(s)", "Socket(s)",
@@ -331,6 +409,12 @@ def generate(baseline: dict, candidate: dict, repo: str, output: Path) -> None:
                    f"candidate {html_lib.escape(str(candidate_warmups))}. "
                    "Historical runs without recorded warmups count as zero.</p>")
     html = html.replace("</body>", warmup_html + "</body>") if "</body>" in html else html + warmup_html
+    coverage_html = "<h2>Major-version comparison coverage</h2><p>" + html_lib.escape(coverage) + "</p>"
+    if warning:
+        coverage_html += ("<p><strong>Benchmark tooling caveat:</strong> "
+                          + html_lib.escape(warning) + "</p>")
+    html = (html.replace("</body>", coverage_html + "</body>")
+            if "</body>" in html else html + coverage_html)
     warnings = []
     for label, run in (("Baseline", baseline), ("Candidate", candidate)):
         for err in run.get("discovery_errors") or []:
@@ -356,10 +440,15 @@ def main() -> None:
     parser.add_argument("--repo", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--scan-limit", type=int, default=60)
+    parser.add_argument("--allow-tool-source-change", action="store_true",
+                        help="Opt in to cross-source comparison when recorded per-model "
+                             "benchmark workloads and profiles match. Tool code equivalence "
+                             "is not guaranteed; strict behavior is the default.")
     args = parser.parse_args()
     if args.scan_limit < 2:
         parser.error("scan-limit must be at least 2")
-    pair = select_pair(candidates_from_github(args.repo, args.scan_limit))
+    pair = select_pair(candidates_from_github(args.repo, args.scan_limit),
+                       allow_tool_source_change=args.allow_tool_source_change)
     generate(*pair, repo=args.repo, output=args.output_dir)
     print("Major comparison:", pair[0]["metadata"]["version"], "→",
           pair[1]["metadata"]["version"])
