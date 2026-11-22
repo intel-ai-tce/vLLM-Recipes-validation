@@ -1,0 +1,197 @@
+name: Intel XPU Recipe Sweep
+
+on:
+  workflow_dispatch:
+    inputs:
+      hardware:
+        description: 'Recipes hardware identifier (for example arc_pro_b70)'
+        required: true
+        type: string
+        default: arc_pro_b70
+      runner_gpu_label:
+        description: 'Self-hosted runner GPU label (for example b70)'
+        required: true
+        type: string
+        default: b70
+      runner_tag:
+        description: 'Self-hosted runner pool label (for example 3c or 4c)'
+        required: true
+        type: string
+        default: 3c
+      model:
+        description: 'Exact model ID (one model per sweep)'
+        required: true
+        type: string
+      sweep_stage:
+        description: 'Sweep stage (all runs TP/DP -> concurrency -> scheduler)'
+        required: true
+        type: choice
+        default: all
+        options:
+          - all
+          - parallel-layout
+          - concurrency
+          - scheduler
+      input_tokens:
+        description: 'Fixed prompt-token length'
+        required: true
+        type: string
+        default: '128'
+      output_tokens:
+        description: 'Fixed generated-token length'
+        required: true
+        type: string
+        default: '128'
+      concurrency:
+        description: 'Representative starting concurrency'
+        required: true
+        type: string
+        default: '32'
+      ttft_sla_ms:
+        description: 'P99 TTFT objective in milliseconds'
+        required: true
+        type: string
+        default: '3000'
+      tpot_sla_ms:
+        description: 'P99 TPOT objective in milliseconds'
+        required: true
+        type: string
+        default: '100'
+      max_model_len:
+        description: 'Optional fixed max-model-len override (not a context-length sweep)'
+        required: false
+        type: string
+        default: ''
+      enable_context_sweep:
+        description: 'Optionally benchmark max-model-len after TP/DP selection (all stages only)'
+        required: false
+        type: boolean
+        default: false
+      context_lengths:
+        description: 'Context lengths to benchmark when context sweep is enabled'
+        required: false
+        type: string
+        default: '4096,8192,16384,32768'
+      context_num_prompts:
+        description: 'Benchmark prompts per context candidate'
+        required: false
+        type: string
+        default: '100'
+      vllm_image:
+        description: 'XPU-enabled vLLM Docker image'
+        required: true
+        type: string
+        default: vllm/vllm-openai-xpu:latest
+      recipe_api_base:
+        description: 'Recipes API base URL'
+        required: true
+        type: string
+        default: https://recipes.vllm.ai
+      recipe_tools_repo:
+        description: 'Source for tools/recipes (empty uses image-bundled tools)'
+        required: false
+        type: string
+        default: https://github.com/intel-ai-tce/vllm.git
+      recipe_tools_ref:
+        description: 'Source ref for tools/recipes (empty if using bundled tools)'
+        required: false
+        type: string
+        default: xpu_vllm_recipes_tool
+
+permissions:
+  contents: read
+
+# Avoid competing runs on the same persistent XPU host.
+concurrency:
+  group: recipe-sweep-xpu-${{ inputs.runner_gpu_label }}-${{ inputs.runner_tag }}
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: [self-hosted, Linux, X64, recipe-validation, local, "${{ inputs.runner_gpu_label }}", "${{ inputs.runner_tag }}"]
+    timeout-minutes: 10080
+    env:
+      HARDWARE: ${{ inputs.hardware }}
+      MODEL: ${{ inputs.model }}
+      SWEEP_STAGE: ${{ inputs.sweep_stage }}
+      INPUT_TOKENS: ${{ inputs.input_tokens }}
+      OUTPUT_TOKENS: ${{ inputs.output_tokens }}
+      CONCURRENCY: ${{ inputs.concurrency }}
+      TTFT_SLA_MS: ${{ inputs.ttft_sla_ms }}
+      TPOT_SLA_MS: ${{ inputs.tpot_sla_ms }}
+      MAX_MODEL_LEN: ${{ inputs.max_model_len }}
+      ENABLE_CONTEXT_SWEEP: ${{ inputs.enable_context_sweep }}
+      CONTEXT_LENGTHS: ${{ inputs.context_lengths }}
+      CONTEXT_NUM_PROMPTS: ${{ inputs.context_num_prompts }}
+      VLLM_IMAGE: ${{ inputs.vllm_image }}
+      RECIPES_BASE_URL: ${{ inputs.recipe_api_base }}
+      RECIPE_TOOLS_REPO: ${{ inputs.recipe_tools_repo }}
+      RECIPE_TOOLS_REF: ${{ inputs.recipe_tools_ref }}
+      HF_HOME: ${{ vars.HF_HOME }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      SWEEP_SERVER_READY_TIMEOUT: '1800'
+
+    steps:
+      - name: Checkout validation harness
+        uses: actions/checkout@v6
+
+      - name: Check runner and prepare isolated work directories
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$HARDWARE" =~ ^[a-z][a-z0-9_]*$ ]] || { echo '::error::Invalid Recipes hardware identifier'; exit 2; }
+          [[ -d /dev/dri ]] && compgen -G '/dev/dri/renderD*' >/dev/null || {
+            echo '::error::No XPU DRM render node on runner'; exit 2;
+          }
+          docker info >/dev/null
+          cache="${HF_HOME:-$HOME/.cache/huggingface}"
+          [[ "$cache" = /* ]] || { echo '::error::HF_HOME must be absolute'; exit 2; }
+          mkdir -p "$cache"
+          cache="$(readlink -f "$cache")"
+          touch "$cache/.xpu-sweep-write-test"
+          rm -f "$cache/.xpu-sweep-write-test"
+          scratch="$RUNNER_TEMP/recipe-sweep-xpu-${{ github.run_id }}-${{ github.run_attempt }}"
+          mkdir -p "$scratch/work" "$scratch/results"
+          echo "HF_HOME=$cache" >> "$GITHUB_ENV"
+          echo "WORK_ROOT=$scratch/work" >> "$GITHUB_ENV"
+          echo "RESULT_ROOT=$scratch/results" >> "$GITHUB_ENV"
+          echo "XPU sweep runner: $RUNNER_NAME; Recipes hardware: $HARDWARE"
+          command -v xpu-smi >/dev/null && xpu-smi discovery || true
+
+      - name: Run XPU Recipes sweep
+        id: sweep
+        continue-on-error: true
+        shell: bash
+        run: ./scripts/run_sweep_xpu.sh
+
+      - name: Write XPU sweep summary
+        if: always()
+        shell: bash
+        run: |
+          python3 scripts/report_sweep_xpu.py \
+            --results "${RESULT_ROOT:-/nonexistent}" \
+            --output "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload XPU sweep artifacts
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: xpu-${{ inputs.hardware }}-sweep-${{ github.run_number }}-attempt-${{ github.run_attempt }}
+          path: ${{ env.RESULT_ROOT }}/
+          retention-days: 90
+
+      - name: Restore scratch ownership and clean up
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          for dir in "${WORK_ROOT:-}" "${RESULT_ROOT:-}"; do
+            [[ -n "$dir" && -d "$dir" ]] || continue
+            if ! rm -rf -- "$dir" 2>/dev/null; then
+              sudo -n chown -R "$(id -u):$(id -g)" "$dir" && rm -rf -- "$dir"
+            fi
+          done
+
+      - name: Fail on sweep failure
+        if: steps.sweep.outcome == 'failure'
+        run: exit 1
