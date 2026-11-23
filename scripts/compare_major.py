@@ -310,6 +310,11 @@ def generate(baseline: dict, candidate: dict, repo: str, output: Path) -> None:
                 .replace("| Previous | Latest |", "| Baseline | Candidate |")
                 .replace("| Model | Previous | Latest |", "| Model | Baseline | Candidate |")
                 .replace("Not tested in latest", "Not tested in candidate"))
+    recipes_url = "https://recipes.vllm.ai/browse?panel=open&hw=xeon6"
+    scope = (f"Xeon 6 [vLLM Recipes]({recipes_url}) validation on "
+             f"vLLM releases **{bv}** and **{cv}**.")
+    # Keep this sentence directly below the Markdown report heading.
+    document = document.replace("\n", "\n\n" + scope + "\n", 1)
     coverage = comparison_coverage(baseline, candidate)
     document += "\n## Major-version comparison coverage\n\n" + coverage + "\n"
     warning = tool_source_warning(baseline, candidate)
@@ -389,6 +394,12 @@ def generate(baseline: dict, candidate: dict, repo: str, output: Path) -> None:
             .replace("Previous", f"Baseline ({bv})")
             .replace("Latest", f"Candidate ({cv})")
             .replace("This weekly report", "This major release report"))
+    scope_html = ('<p><strong>Validation scope:</strong> Xeon 6 '
+                  f'<a href="{html_lib.escape(recipes_url, quote=True)}">vLLM Recipes</a> '
+                  f'validated on vLLM releases <strong>{html_lib.escape(bv)}</strong> '
+                  f'and <strong>{html_lib.escape(cv)}</strong>.</p>')
+    # Insert at the top, independent of weekly/major email-template changes.
+    html = re.sub(r'(<body\b[^>]*>)', lambda m: m.group(1) + scope_html, html, count=1)
     hardware_html = ("<h2>Hardware comparison</h2>"
                      + "<p><strong>" + html_lib.escape(status) + "</strong></p>"
                      + "<table border='1' cellpadding='5'><tr><th>Field</th>"
