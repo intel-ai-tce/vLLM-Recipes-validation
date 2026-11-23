@@ -2,6 +2,17 @@ name: Major Version Xeon 6 Comparison Report
 
 on:
   workflow_dispatch:
+    inputs:
+      start_version:
+        description: "Optional first release (e.g. v0.32.0); empty uses the latest two"
+        required: false
+        type: string
+        default: ""
+      end_version:
+        description: "Optional last release (e.g. v0.34.0); empty uses latest"
+        required: false
+        type: string
+        default: ""
   workflow_run:
     workflows:
       - Major Version Xeon 6 Recipe Validation
@@ -28,12 +39,23 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          START_VERSION: ${{ inputs.start_version || '' }}
+          END_VERSION: ${{ inputs.end_version || '' }}
         shell: bash
         run: |
           set -euo pipefail
           python3 -m unittest discover -s scripts -p 'test_compare_major*.py' -v
-          python3 scripts/compare_major.py \
-            --repo "$GH_REPO" --output-dir "$RUNNER_TEMP/major-comparison" --allow-tool-source-change
+          if [[ -z "$START_VERSION" && -z "$END_VERSION" ]]; then
+            # Preserve the existing default selection and report format.
+            python3 scripts/compare_major.py \
+              --repo "$GH_REPO" --output-dir "$RUNNER_TEMP/major-comparison" --allow-tool-source-change
+          else
+            args=(--repo "$GH_REPO" --output-dir "$RUNNER_TEMP/major-comparison" \
+                  --allow-tool-source-change)
+            [[ -z "$START_VERSION" ]] || args+=(--start-version "$START_VERSION")
+            [[ -z "$END_VERSION" ]] || args+=(--end-version "$END_VERSION")
+            python3 scripts/compare_major_range.py "${args[@]}"
+          fi
           cat "$RUNNER_TEMP/major-comparison/latest.md" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish major comparison to report branch
