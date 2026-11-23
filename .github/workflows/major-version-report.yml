@@ -86,6 +86,13 @@ jobs:
             commit -m 'docs: update Xeon 6 major release comparison'
           git -C "$publish" push origin HEAD:report
 
+      - name: Explain disabled major report email
+        if: ${{ vars.MAJOR_REPORT_EMAIL_ENABLED != 'true' }}
+        shell: bash
+        run: |
+          echo '::notice::Major comparison email skipped: MAJOR_REPORT_EMAIL_ENABLED is not true.'
+          echo 'Email skipped: set MAJOR_REPORT_EMAIL_ENABLED=true.' >> "$GITHUB_STEP_SUMMARY"
+
       - name: Send major report to Power Automate (optional)
         if: ${{ vars.MAJOR_REPORT_EMAIL_ENABLED == 'true' }}
         env:
@@ -97,5 +104,18 @@ jobs:
             echo '::error::POWER_AUTOMATE_REPORT_URL is required when major email is enabled'
             exit 1
           fi
+          python3 - "$RUNNER_TEMP/major-comparison/notification.json" <<'PYVALIDATE'
+          import json, sys
+          from pathlib import Path
+          payload = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+          required = ('email_html', 'date', 'tested', 'passed', 'failed',
+                      'new_failures', 'recovered_models', 'performance')
+          missing = [key for key in required if key not in payload]
+          if missing or not payload.get('email_html'):
+              raise SystemExit(f'Email payload incomplete: missing={missing}')
+          print('Submitting', payload.get('report_type'), 'report to Power Automate for',
+                payload.get('releases', [payload.get('baseline_version'), payload.get('candidate_version')]))
+          PYVALIDATE
           python3 scripts/report_notifications.py send \
             --notification "$RUNNER_TEMP/major-comparison/notification.json"
+          echo 'Power Automate webhook accepted the major comparison notification (check Power Automate run history for actual email delivery).' >> "$GITHUB_STEP_SUMMARY"

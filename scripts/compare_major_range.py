@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Optional multi-release Xeon 6 comparison, retaining the existing two-run report."""
 from __future__ import annotations
+from report_notifications import make_notification
 
 import argparse
 from html import escape
@@ -109,11 +110,6 @@ def generate_range(runs: list[dict], repo: str, output: Path) -> None:
           "| --- | " + " | ".join(["---:"] * len(runs)) + " |"]
     for name, key in (("Tested", "tested"), ("Passed", "passed"), ("Failed", "failed")):
         md.append("| " + name + " | " + " | ".join(str(r["summary"].get(key, 0)) for r in runs) + " |")
-    md += ["", "## Validation status by model", "",
-           "| Model | " + " | ".join(headers) + " |",
-           "| --- | " + " | ".join(["---"] * len(runs)) + " |"]
-    for model, statuses in status_rows(runs):
-        md.append("| `" + model.replace("|", "\\|") + "` | " + " | ".join(statuses) + " |")
     md += ["", "## Performance by release", "",
            "Each number is compared with the immediately preceding release. "
            "🟢 improved; 🔴 regressed; unmarked = no change (<3%) or not comparable. "
@@ -172,9 +168,6 @@ def generate_range(runs: list[dict], repo: str, output: Path) -> None:
             f'<p><b>Validation scope:</b> Xeon 6 <a href="{escape(RECIPES_URL, quote=True)}">vLLM Recipes</a> '
             f'validated on vLLM releases {escape(versions[0])} through {escape(versions[-1])}.</p>',
             '<h3>Release comparison summary</h3>', table(["Measure", *headers], summary_rows),
-            '<h3>Validation status by model</h3>',
-            table(["Model", *headers], [[(model, "neutral"), *[(s, "red" if s == "FAIL" else "neutral") for s in statuses]]
-                                         for model, statuses in status_rows(runs)]),
             '<h3>Performance by release</h3>',
             '<p><span style="color:#16733a">Green = improved</span>; '
             '<span style="color:#b42318">red = regressed</span>; '
@@ -189,12 +182,21 @@ def generate_range(runs: list[dict], repo: str, output: Path) -> None:
     report_id = "-".join(versions) + "-" + "-".join(str(r["run_id"]) for r in runs)
     report_id = "".join(c if c.isalnum() or c in "-_." else "_" for c in report_id)
     base = f"https://github.com/{repo}"
-    notice = {"report_type": "major_range", "title": title,
-              "baseline_version": versions[0], "candidate_version": versions[-1],
-              "releases": versions, "report_id": report_id,
-              "report_url": f"{base}/blob/report/major/latest.md",
-              "exact_report_url": f"{base}/blob/report/major/history/{report_id}.md",
-              "email_html": "\n".join(html)}
+    # Preserve the standard Power Automate payload contract for range reports.
+    # The range-specific HTML email is retained below.
+    notice = make_notification(runs[0]["summary"], runs[-1]["summary"], repo,
+                               runs[0]["url"], runs[-1]["url"])
+    notice.update({
+        "report_type": "major_range", "title": title,
+        "baseline_version": versions[0], "candidate_version": versions[-1],
+        "releases": versions, "report_id": report_id,
+        "report_url": f"{base}/blob/report/major/latest.md",
+        "report_history_url": f"{base}/tree/report/major/history",
+        "exact_report_url": f"{base}/blob/report/major/history/{report_id}.md",
+        "baseline_run_url": runs[0]["url"],
+        "candidate_run_url": runs[-1]["url"],
+        "email_html": "\n".join(html),
+    })
     output.mkdir(parents=True, exist_ok=True)
     (output / "latest.md").write_text("\n".join(md) + "\n", encoding="utf-8")
     (output / "notification.json").write_text(json.dumps(notice, indent=2) + "\n", encoding="utf-8")
