@@ -387,19 +387,76 @@ def generate(baseline: dict, candidate: dict, repo: str, output: Path) -> None:
         "exact_report_url": f"{base}/blob/report/major/history/{identifier}.md",
         "baseline_run_url": baseline["url"], "candidate_run_url": candidate["url"],
     })
-    # Power Automate can use email_html for a complete standalone Outlook email.
-    html = build_email_html(notification)
-    html = (html.replace("Xeon 6 Weekly vLLM Recipes Validation", notification["title"])
-            .replace("Weekly summary", "Release comparison summary")
-            .replace("Previous", f"Baseline ({bv})")
-            .replace("Latest", f"Candidate ({cv})")
-            .replace("This weekly report", "This major release report"))
+    # Use a major-release-specific email overview. The weekly formatter's
+    # single-row summary describes only the candidate and is misleading here.
+    def email_table(headers, rows):
+        def td(value, heading=False):
+            tag = "th" if heading else "td"
+            style = ("background:#e9eef5;font-weight:bold;" if heading else "")
+            return (f'<{tag} style="border:1px solid #cbd5e1;padding:6px;{style}">'
+                    f'{html_lib.escape(str(value), quote=True)}</{tag}>')
+
+        head = "<tr>" + "".join(td(value, True) for value in headers) + "</tr>"
+        body = "".join("<tr>" + "".join(td(value) for value in row) + "</tr>"
+                       for row in rows)
+        return ('<table style="border-collapse:collapse;width:100%;font-size:13px">'
+                + head + body + "</table>")
+
+    overview_rows = []
+    for title, key in (("Tested", "tested"), ("Passed", "passed"), ("Failed", "failed")):
+        previous = int(notification["previous_" + key])
+        latest = int(notification[key])
+        overview_rows.append([title, previous, latest, f"{latest - previous:+d}"])
+
+    previous_models = {row["model"]: row for row in old["models"]}
+    latest_models = {row["model"]: row for row in new["models"]}
+    regressions = notification["new_failures"]
+    recovered = notification["recovered_models"]
+    added = notification["newly_tested"]
+    removed = notification["not_tested_latest"]
+    transitions = ([(model, "Regression") for model in regressions]
+                   + [(model, "Recovered") for model in recovered]
+                   + [(model, "Newly tested") for model in added]
+                   + [(model, "Not tested in candidate") for model in removed])
+    transitions_html = email_table(
+        ["Model", f"Baseline ({bv})", f"Candidate ({cv})", "Assessment"],
+        [[model, previous_models.get(model, {}).get("status", "NOT TESTED"),
+          latest_models.get(model, {}).get("status", "NOT TESTED"), label]
+         for model, label in transitions]
+    ) if transitions else "<p>No status transitions.</p>"
+    summary_html = email_table(
+        ["Measure", f"Baseline ({bv})", f"Candidate ({cv})", "Delta"], overview_rows)
     scope_html = ('<p><strong>Validation scope:</strong> Xeon 6 '
                   f'<a href="{html_lib.escape(recipes_url, quote=True)}">vLLM Recipes</a> '
                   f'validated on vLLM releases <strong>{html_lib.escape(bv)}</strong> '
                   f'and <strong>{html_lib.escape(cv)}</strong>.</p>')
-    # Insert at the top, independent of weekly/major email-template changes.
-    html = re.sub(r'(<body\b[^>]*>)', lambda m: m.group(1) + scope_html, html, count=1)
+    intro = (f'<h2>{html_lib.escape(notification["title"])}</h2>'
+             + scope_html
+             + f'<p><strong>Baseline ({html_lib.escape(bv)}):</strong> '
+               f'{html_lib.escape(str(old.get("run_id", "unknown")))} '
+               f'({html_lib.escape(str(old.get("run_date", "-")))})<br>'
+               f'<strong>Candidate ({html_lib.escape(cv)}):</strong> '
+               f'{html_lib.escape(str(new.get("run_id", "unknown")))} '
+               f'({html_lib.escape(str(new.get("run_date", "-")))})</p>'
+             + '<h3>Overall result</h3>' + summary_html
+             + '<h3>Status transitions</h3>'
+             + f'<p><strong>Regressions:</strong> {len(regressions)} | '
+               f'<strong>Recovered:</strong> {len(recovered)} | '
+               f'<strong>Newly tested:</strong> {len(added)} | '
+               f'<strong>No longer tested:</strong> {len(removed)}</p>'
+             + transitions_html)
+
+    # Preserve the existing throughput/TTFT/TPOT tables and later sections.
+    html = build_email_html(notification)
+    first_heading = '<h2>Xeon 6 Weekly vLLM Recipes Validation</h2>'
+    performance_heading = '<h3>Output Throughput (tok/s)</h3>'
+    if first_heading not in html or performance_heading not in html:
+        raise ValueError("Weekly email template changed; cannot locate performance tables")
+    html = (html[:html.index(first_heading)] + intro
+            + html[html.index(performance_heading):])
+    html = (html.replace("Previous", f"Baseline ({bv})")
+            .replace("Latest", f"Candidate ({cv})")
+            .replace("This weekly report", "This major release report"))
     hardware_html = ("<h2>Hardware comparison</h2>"
                      + "<p><strong>" + html_lib.escape(status) + "</strong></p>"
                      + "<table border='1' cellpadding='5'><tr><th>Field</th>"
