@@ -187,7 +187,8 @@ def generate_range(runs: list[dict], repo: str, output: Path) -> None:
     notice = make_notification(runs[0]["summary"], runs[-1]["summary"], repo,
                                runs[0]["url"], runs[-1]["url"])
     notice.update({
-        "report_type": "major_range", "title": title,
+        "report_type": "major", "comparison_mode": "range",
+        "title": title,
         "baseline_version": versions[0], "candidate_version": versions[-1],
         "releases": versions, "report_id": report_id,
         "report_url": f"{base}/blob/report/major/latest.md",
