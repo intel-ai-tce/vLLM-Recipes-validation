@@ -427,6 +427,11 @@ def main() -> int:
         docker_cmd.extend([
             "-e", "RECIPE_VALIDATION_RESULT_OUT=/validation/recipe-validation-status.json"
         ])
+    if args.hardware == "arc_pro_b70" and os.environ.get(
+        "RECIPE_AUTO_FIT_XPU_PARALLELISM", "false"
+    ).lower() in ("true", "1"):
+        docker_cmd.extend(["-e", "RECIPE_AUTO_FIT_XPU_PARALLELISM=true"])
+        result["runtime"]["auto_fit_xpu_parallelism"] = True
 
     # Intel XPU needs DRM render nodes exposed inside the vLLM container.
     if args.hardware != "xeon6":
@@ -527,6 +532,9 @@ def main() -> int:
             except (OSError, ValueError) as exc:
                 validation_status = {"status": "ERROR", "reason": str(exc)}
             result["recipe_validation"] = validation_status
+            adjustment = validation_status.get("parallelism_adjustment")
+            if isinstance(adjustment, dict):
+                result["parallelism_adjustment"] = adjustment
             if not ready and validation_status.get("status") == "SKIP":
                 result["status"] = "SKIP"
                 result["skip_reason"] = validation_status.get(

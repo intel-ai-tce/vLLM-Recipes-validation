@@ -13,6 +13,7 @@ from pathlib import Path
 from compare_weekly import compare
 from report_notifications import make_notification
 from send_teams_report import build_email_html
+from email_font import apply_aptos
 
 
 def release(value: str) -> tuple[int, int, int]:
@@ -496,7 +497,7 @@ def generate(baseline: dict, candidate: dict, repo: str, output: Path) -> None:
                         + "".join(warnings) + "</ul>")
         html = (html.replace("</body>", warning_html + "</body>")
                 if "</body>" in html else html + warning_html)
-    notification["email_html"] = html
+    notification["email_html"] = apply_aptos(html)
     output.mkdir(parents=True, exist_ok=True)
     (output / "latest.md").write_text(document, encoding="utf-8")
     (output / "notification.json").write_text(json.dumps(notification, indent=2) + "\n", encoding="utf-8")

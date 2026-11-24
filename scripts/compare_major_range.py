@@ -11,6 +11,7 @@ from pathlib import Path
 from compare_major import (candidates_from_github, compatible, complete, eligible,
                            generate, release, tool_source_warning)
 from compare_weekly import METRICS, number
+from email_font import apply_aptos
 
 RECIPES_URL = "https://recipes.vllm.ai/browse?panel=open&hw=xeon6"
 
@@ -196,7 +197,7 @@ def generate_range(runs: list[dict], repo: str, output: Path) -> None:
         "exact_report_url": f"{base}/blob/report/major/history/{report_id}.md",
         "baseline_run_url": runs[0]["url"],
         "candidate_run_url": runs[-1]["url"],
-        "email_html": "\n".join(html),
+        "email_html": apply_aptos("\n".join(html)),
     })
     output.mkdir(parents=True, exist_ok=True)
     (output / "latest.md").write_text("\n".join(md) + "\n", encoding="utf-8")

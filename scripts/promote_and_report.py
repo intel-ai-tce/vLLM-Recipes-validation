@@ -77,6 +77,7 @@ def main() -> int:
                 "stages": data.get("stages"),
                 "metrics": data.get("metrics", {}),
                 "runtime": data.get("runtime", {}),
+                "parallelism_adjustment": data.get("parallelism_adjustment"),
             }
             (tmp / "validation.json").write_text(
                 json.dumps(validation, indent=2) + "\n"
@@ -113,6 +114,10 @@ def main() -> int:
         "passed": sum(r.get("status") == "PASS" for r in rows),
         "failed": sum(r.get("status") not in ("PASS", "SKIP") for r in rows),
         "skipped": sum(r.get("status") == "SKIP" for r in rows),
+        "downgraded": sum(
+            bool((r.get("parallelism_adjustment") or {}).get("changed"))
+            for r in rows
+        ),
         "models": rows,
     }
     latest_json = results_root / "weekly-summary.json"
@@ -123,11 +128,20 @@ def main() -> int:
         status = r.get("status", "FAIL")
         m = r.get("metrics", {})
         stages = r.get("stages", {})
+        adjustment = r.get("parallelism_adjustment") or {}
+        original = adjustment.get("recipe") or {}
+        effective = adjustment.get("effective") or {}
+        layout = (
+            f"TP {original.get('tp')}/DP {original.get('dp')} -> "
+            f"TP {effective.get('tp')}/DP {effective.get('dp')}"
+            if adjustment.get("changed") else "-"
+        )
         error = html.escape(str(r.get("skip_reason") if status == "SKIP" else r.get("error", ""))) or "-"
         trs.append(
             "<tr>"
             f"<td><code>{html.escape(r['model'])}</code></td>"
             f"<td class='{status.lower()}'>{html.escape(status)}</td>"
+            f"<td>{html.escape(layout)}</td>"
             f"<td>{html.escape(str(stages.get('conversion','-')))}</td>"
             f"<td>{html.escape(str(stages.get('startup','-')))}</td>"
             f"<td>{html.escape(str(stages.get('benchmark','-')))}</td>"
@@ -161,7 +175,7 @@ Generated: <code>{html.escape(generated_at)}</code></p>
 <div class='card'><strong>Failed</strong><br>{summary['failed']}</div>
 </div>
 <p>Quick performance workload: 128 input / 128 output, concurrency 1 by default; each result records the exact workload.</p>
-<table><thead><tr><th>Model</th><th>Status</th><th>Convert</th><th>Startup</th><th>Benchmark</th><th>P99 TTFT ms</th><th>P99 TPOT ms</th><th>Output tok/s</th><th>Error</th></tr></thead>
+<table><thead><tr><th>Model</th><th>Status</th><th>TP/DP (recipe -> effective)</th><th>Convert</th><th>Startup</th><th>Benchmark</th><th>P99 TTFT ms</th><th>P99 TPOT ms</th><th>Output tok/s</th><th>Error</th></tr></thead>
 <tbody>{''.join(trs)}</tbody></table>
 </body></html>"""
     latest_html = results_root / "weekly-summary.html"

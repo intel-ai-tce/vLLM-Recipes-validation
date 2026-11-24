@@ -171,6 +171,8 @@ PY
     python3 "$RECIPE_TOOL_PATH/recipe_json_to_vllm_config.py" \
       --model "$SWEEP_MODEL" --hardware "$SWEEP_HARDWARE" \
       --api-base "$SWEEP_RECIPES_BASE_URL" --detect-hardware \
+      --auto-fit-xpu-parallelism \
+      --validation-result-out /output/recipe-validation-status.json \
       --input-tokens "$SWEEP_INPUT_TOKENS" --output-tokens "$SWEEP_OUTPUT_TOKENS" \
       --concurrency "$SWEEP_CONCURRENCY" \
       --ttft-sla-ms "$SWEEP_TTFT_SLA_MS" --tpot-sla-ms "$SWEEP_TPOT_SLA_MS" \

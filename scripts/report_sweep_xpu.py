@@ -76,6 +76,8 @@ def main():
     root = args.results
     sweep = root / "sweep"
     info = read_json(root / "sweep-metadata.json") or {}
+    validation = read_json(root / "recipe-validation-status.json") or {}
+    adjustment = validation.get("parallelism_adjustment") or {}
     tools = read_json(root / "recipe-tools.json") or {}
     devices = read_json(root / "xpu-devices.json") or []
     if not isinstance(devices, list):
@@ -113,6 +115,24 @@ def main():
         ("Context sweep enabled", info.get("context_sweep_enabled", False)),
         ("Context candidates", info.get("context_lengths")),
     ])
+    lines += ["", "## Recipe parallelism adjustment", ""]
+    if adjustment:
+        original = adjustment.get("recipe") or {}
+        effective = adjustment.get("effective") or {}
+        table(lines, ["Field", "Value"], [
+            ("Downgraded", adjustment.get("changed")),
+            ("Original TP / DP", f"{original.get('tp')} / {original.get('dp')}"),
+            ("Effective TP / DP", f"{effective.get('tp')} / {effective.get('dp')}"),
+            ("Visible B70 GPUs", adjustment.get("visible_gpus")),
+            ("Memory fit", adjustment.get("fit_status")),
+            ("Estimated VRAM per GPU", adjustment.get("estimated_per_gpu_bytes")),
+            ("Usable VRAM per GPU", adjustment.get("usable_per_gpu_bytes")),
+        ])
+        lines.append("Memory fit is estimated; the benchmark verifies startup and inference.")
+    else:
+        lines.append(
+            f"No adjustment recorded; conversion status: {safe(validation.get('status'))}."
+        )
     lines += ["", "## System", ""]
     table(lines, ["Setting", "Value"], [
         ("Host", system.get("hostname")),
