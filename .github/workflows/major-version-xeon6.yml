@@ -19,6 +19,11 @@ on:
         description: "Optional full Docker image override (takes precedence over version)"
         required: false
         default: ""
+      benchmark_runs:
+        description: "Measured benchmark repetitions per model (positive integer)"
+        type: number
+        required: true
+        default: 3
       model:
         description: "Optional exact model ID; empty validates all Xeon 6 recipes"
         required: false
@@ -70,6 +75,7 @@ jobs:
       RECIPES_BASE_URL: ${{ inputs.recipe_api_base || 'https://recipes.vllm.ai' }}
       VLLM_TEST_ENV_VARS: ${{ inputs.vllm_env_vars || '' }}
       BENCH_NUM_PROMPTS: "100"
+      BENCH_NUM_RUNS: ${{ inputs.benchmark_runs }}
       # Allow large models loading from CIFS to finish initialization.
       # Major-version only; weekly/nightly retain the 3600s default.
       SERVER_START_TIMEOUT_SEC: "7200"
@@ -161,6 +167,7 @@ jobs:
           import json
           import os
           from pathlib import Path
+          from scripts.benchmark_statistics import format_metric
 
           report = Path(os.environ['RESULT_ROOT']) / 'weekly-summary.json'
           output = Path(os.environ['GITHUB_STEP_SUMMARY'])
@@ -192,9 +199,9 @@ jobs:
                           cell(stages.get('conversion', '-')),
                           cell(stages.get('startup', '-')),
                           cell(stages.get('benchmark', '-')),
-                          cell(metrics.get('p99_ttft_ms', '-')),
-                          cell(metrics.get('p99_tpot_ms', '-')),
-                          cell(metrics.get('output_throughput', '-')),
+                          cell(format_metric(item, 'p99_ttft_ms')),
+                          cell(format_metric(item, 'p99_tpot_ms')),
+                          cell(format_metric(item, 'output_throughput')),
                           error,
                       ]
                       f.write('| ' + ' | '.join(columns) + ' |\n')
@@ -233,6 +240,7 @@ jobs:
               'recipe_tools_repo': os.environ.get('MAJOR_TOOLS_REPO', ''),
               'recipe_tools_ref': os.environ.get('MAJOR_TOOLS_REF', ''),
               'bench_num_prompts': os.environ.get('BENCH_NUM_PROMPTS', ''),
+              'bench_num_runs': os.environ.get('BENCH_NUM_RUNS', '1'),
           }
           root = Path(os.environ['RESULT_ROOT'])
           root.mkdir(parents=True, exist_ok=True)

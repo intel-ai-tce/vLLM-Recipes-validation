@@ -27,6 +27,7 @@ def main() -> int:
     ap.add_argument("--input-len", type=int, default=128)
     ap.add_argument("--output-len", type=int, default=128)
     ap.add_argument("--num-prompts", type=int, default=5)
+    ap.add_argument("--benchmark-runs", type=int, default=1)
     ap.add_argument("--num-warmups", type=int, default=0)
     ap.add_argument("--max-concurrency", type=int, default=1)
     ap.add_argument("--request-rate", default="inf")
@@ -36,6 +37,8 @@ def main() -> int:
     ap.add_argument("--skip", action="append", default=[],
                     help="Exact model ID to mark SKIP without starting a container")
     args = ap.parse_args()
+    if args.benchmark_runs < 1:
+        ap.error("--benchmark-runs must be positive")
 
     discovery = json.loads(Path(args.discovery).read_text())
     models = discovery["models"]
@@ -100,6 +103,8 @@ def main() -> int:
             str(args.output_len),
             "--num-prompts",
             str(args.num_prompts),
+            "--benchmark-runs",
+            str(args.benchmark_runs),
             "--num-warmups",
             str(args.num_warmups),
             "--max-concurrency",

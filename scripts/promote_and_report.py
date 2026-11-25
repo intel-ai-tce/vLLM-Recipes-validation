@@ -9,6 +9,7 @@ import html
 import json
 import shutil
 from pathlib import Path
+from benchmark_statistics import format_metric
 
 
 def main() -> int:
@@ -76,6 +77,8 @@ def main() -> int:
                 "workload": data.get("workload"),
                 "stages": data.get("stages"),
                 "metrics": data.get("metrics", {}),
+                "benchmark_statistics": data.get("benchmark_statistics", {}),
+                "benchmark_run_count": data.get("benchmark_run_count", 1),
                 "runtime": data.get("runtime", {}),
                 "parallelism_adjustment": data.get("parallelism_adjustment"),
             }
@@ -145,9 +148,9 @@ def main() -> int:
             f"<td>{html.escape(str(stages.get('conversion','-')))}</td>"
             f"<td>{html.escape(str(stages.get('startup','-')))}</td>"
             f"<td>{html.escape(str(stages.get('benchmark','-')))}</td>"
-            f"<td>{html.escape(str(m.get('p99_ttft_ms','-')))}</td>"
-            f"<td>{html.escape(str(m.get('p99_tpot_ms','-')))}</td>"
-            f"<td>{html.escape(str(m.get('output_throughput','-')))}</td>"
+            f"<td>{html.escape(format_metric(r, 'p99_ttft_ms'))}</td>"
+            f"<td>{html.escape(format_metric(r, 'p99_tpot_ms'))}</td>"
+            f"<td>{html.escape(format_metric(r, 'output_throughput'))}</td>"
             f"<td class='error'>{error}</td>"
             "</tr>"
         )

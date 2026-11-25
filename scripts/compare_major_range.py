@@ -12,6 +12,7 @@ from compare_major import (candidates_from_github, compatible, complete, eligibl
                            generate, release, tool_source_warning)
 from compare_weekly import METRICS, number
 from email_font import apply_aptos
+from benchmark_statistics import format_metric
 
 RECIPES_URL = "https://recipes.vllm.ai/browse?panel=open&hw=xeon6"
 
@@ -126,16 +127,21 @@ def generate_range(runs: list[dict], repo: str, output: Path) -> None:
             cells = metric_cells(runs, model, metric, direction)
             if all(value is None for value, _ in cells):
                 continue
-            rendered = [("—" if value is None else f"{value:.2f}") for value, _ in cells]
+            rendered = [("—" if value is None else format_metric(
+                next(r for r in run["summary"]["models"] if r["model"] == model), metric))
+                for run, (value, _) in zip(runs, cells)]
             md_rendered = [("🟢 " if color == "green" else "🔴 " if color == "red" else "") + value
                            for value, (_, color) in zip(rendered, cells)]
             md.append("| `" + model.replace("|", "\\|") + "` | " + " | ".join(md_rendered) + " |")
-            trows.append((model, cells))
+            trows.append((model, [(value, color) for value, (_, color) in zip(rendered, cells)]))
         if not trows:
             md.append("| — | " + " | ".join(["—"] * len(runs)) + " |")
         md.append("")
         tables.append((label, trows))
     md += ["## Comparison qualifications", "",
+           "Repeated runs: throughput is mean; P99 is median of run-level P99s. "
+           "± denotes sample standard deviation, not a confidence interval. "
+           "Legacy single runs have no standard deviation; mixed run counts are observational.", "",
            "Only successful benchmark metrics are displayed; FAIL and NOT TESTED are blank. "
            "Adjacent-release changes are evaluated only when both models passed. "
            "Selected releases must pass recorded workload compatibility checks.", ""]
@@ -175,7 +181,7 @@ def generate_range(runs: list[dict], repo: str, output: Path) -> None:
             'uncolored = neutral or not comparable. Changes use a 3% threshold relative '
             'to the immediately preceding release.</p>']
     for label, rows in tables:
-        values = [[(model, "neutral")] + [("—" if value is None else f"{value:.2f}", color)
+        values = [[(model, "neutral")] + [(value, color)
                                              for value, color in cells] for model, cells in rows]
         html += [f'<h3>{escape(label)}</h3>', table(["Model", *headers], values)]
     html += ['<p>Tooling or hardware differences may affect observed performance. '

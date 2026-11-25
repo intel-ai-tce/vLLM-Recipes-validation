@@ -106,6 +106,7 @@ python3 "$ROOT/scripts/run_all.py" \
   --input-len "$BENCH_INPUT_LEN" \
   --output-len "$BENCH_OUTPUT_LEN" \
   --num-prompts "$BENCH_NUM_PROMPTS" \
+  --benchmark-runs "${BENCH_NUM_RUNS:-1}" \
   --num-warmups "$BENCH_NUM_WARMUPS" \
   --max-concurrency "$BENCH_MAX_CONCURRENCY" \
   --request-rate "$BENCH_REQUEST_RATE" \

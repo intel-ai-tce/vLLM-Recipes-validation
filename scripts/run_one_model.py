@@ -231,6 +231,8 @@ def extract_metrics(data):
     # and normalize the common metrics when present.
     aliases = {
         "completed": ["completed", "completed_requests", "num_completed_requests"],
+        "failed": ["failed", "failed_requests", "num_failed_requests"],
+        "request_goodput": ["request_goodput", "goodput"],
         "request_throughput": ["request_throughput", "request_throughput_rps"],
         "output_throughput": ["output_throughput", "output_throughput_tps"],
         "mean_ttft_ms": ["mean_ttft_ms", "mean_ttft"],
@@ -296,10 +298,13 @@ def main() -> int:
     ap.add_argument("--input-len", type=int, default=128)
     ap.add_argument("--output-len", type=int, default=128)
     ap.add_argument("--num-prompts", type=int, default=5)
+    ap.add_argument("--benchmark-runs", type=int, default=1)
     ap.add_argument("--num-warmups", type=int, default=0)
     ap.add_argument("--max-concurrency", type=int, default=1)
     ap.add_argument("--request-rate", default="inf")
     args = ap.parse_args()
+    if args.benchmark_runs < 1:
+        ap.error("--benchmark-runs must be positive")
 
     safe_name = args.model.replace("/", "__")
     work = (Path(args.work_root) / safe_name).resolve()
@@ -773,29 +778,50 @@ def main() -> int:
                 "--seconds", str(max(60, args.bench_timeout)),
             ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             time.sleep(1)  # Allow perf to attach before inference traffic.
+        from benchmark_statistics import aggregate_runs
+
+        result["benchmark_run_count"] = args.benchmark_runs
+        result["benchmark_runs"] = []
         try:
-            with bench_log.open("w") as log:
-                run(
-                    bench_cmd,
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                    timeout=args.bench_timeout,
-                )
-            bench_json = find_latest_json(bench_dir)
-            if bench_json is None:
-                raise RuntimeError("benchmark finished without a result JSON")
-            raw = load_json(bench_json)
-            result["benchmark_result_file"] = str(
-                bench_json.relative_to(result_dir)
-            )
-            result["metrics"] = extract_metrics(raw)
-            completed = result["metrics"].get("completed")
-            # A zero-success benchmark may exit 0; never promote it as PASS.
-            if isinstance(completed, bool) or not isinstance(completed, (int, float)) or completed <= 0:
-                raise RuntimeError(
-                    f"benchmark reported no successful requests "
-                    f"(completed={completed!r})"
-                )
+            for index in range(args.benchmark_runs):
+                repeat = args.benchmark_runs > 1
+                directory = bench_dir / f"run-{index + 1:02d}" if repeat else bench_dir
+                directory.mkdir(exist_ok=True)
+                log_path = directory / "benchmark.log" if repeat else bench_log
+                command = bench_cmd.copy()
+                if repeat:
+                    command[command.index("--result-dir") + 1] = f"/results/benchmark/{directory.name}"
+                    command.extend(["--seed", str(index)])
+                    (directory / "benchmark-command.sh").write_text(benchmark_shell_command(command))
+                entry = {"run": index + 1, "status": "FAIL"}
+                result["benchmark_runs"].append(entry)
+                try:
+                    with log_path.open("w") as log:
+                        run(command, stdout=log, stderr=subprocess.STDOUT,
+                            timeout=args.bench_timeout)
+                    bench_json = find_latest_json(directory)
+                    if bench_json is None:
+                        raise RuntimeError("benchmark finished without a result JSON")
+                    metrics = extract_metrics(load_json(bench_json))
+                    entry["result_file"] = str(bench_json.relative_to(result_dir))
+                    entry["metrics"] = metrics
+                    completed = metrics.get("completed")
+                    if isinstance(completed, bool) or not isinstance(completed, (int, float)) or completed <= 0:
+                        raise RuntimeError(f"benchmark reported no successful requests (completed={completed!r})")
+                    if repeat and (completed != args.num_prompts or metrics.get("failed", 0) > 0):
+                        raise RuntimeError(f"incomplete benchmark: {completed}/{args.num_prompts} requests")
+                    entry["status"] = "PASS"
+                except Exception as exc:
+                    entry["error"] = str(exc)
+                    raise RuntimeError(f"run {index + 1}: {exc}") from exc
+            result["metrics"], result["benchmark_statistics"] = aggregate_runs(
+                [entry["metrics"] for entry in result["benchmark_runs"]])
+            result["benchmark_result_file"] = result["benchmark_runs"][0]["result_file"]
+            if args.benchmark_runs > 1:
+                aggregate_path = bench_dir / "aggregated.json"
+                aggregate_path.write_text(json.dumps({"metrics": result["metrics"],
+                    "benchmark_statistics": result["benchmark_statistics"]}, indent=2) + "\n")
+                result["benchmark_result_file"] = str(aggregate_path.relative_to(result_dir))
             result["stages"]["benchmark"] = "PASS"
             result["status"] = "PASS"
             return_code = 0

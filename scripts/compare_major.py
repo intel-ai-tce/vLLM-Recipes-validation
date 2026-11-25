@@ -14,6 +14,7 @@ from compare_weekly import compare
 from report_notifications import make_notification
 from send_teams_report import build_email_html
 from email_font import apply_aptos
+from benchmark_statistics import variability_rows
 
 
 def release(value: str) -> tuple[int, int, int]:
@@ -497,6 +498,18 @@ def generate(baseline: dict, candidate: dict, repo: str, output: Path) -> None:
                         + "".join(warnings) + "</ul>")
         html = (html.replace("</body>", warning_html + "</body>")
                 if "</body>" in html else html + warning_html)
+    keys = ("output_throughput", "p99_ttft_ms", "p99_tpot_ms", "request_goodput")
+    headers = ["Release", "Model", "Output tok/s", "P99 TTFT ms", "P99 TPOT ms", "Goodput req/s"]
+    rows = list(variability_rows((baseline, candidate), keys))
+    if rows:
+        note = ("Throughput/goodput: mean; P99: median of run-level P99s. "
+                "± is sample standard deviation, not a confidence interval. "
+                "Legacy single runs have no standard deviation; mixed run counts are observational.")
+        document += "\n## Benchmark run variability\n\n" + note + "\n\n"
+        document += "| " + " | ".join(headers) + " |\n| " + " | ".join(["---"] * len(headers)) + " |\n"
+        document += "".join("| " + " | ".join(str(v).replace("|", "/") for v in row) + " |\n" for row in rows)
+        block = "<h3>Benchmark run variability</h3><p>" + html_lib.escape(note) + "</p>" + email_table(headers, rows)
+        html = html.replace("</body>", block + "</body>") if "</body>" in html else html + block
     notification["email_html"] = apply_aptos(html)
     output.mkdir(parents=True, exist_ok=True)
     (output / "latest.md").write_text(document, encoding="utf-8")
