@@ -48,6 +48,16 @@ on:
         description: 'Comma/space-separated model IDs to SKIP without running'
         required: false
         default: ''
+      engine_ready_timeout:
+        description: 'vLLM engine ready timeout in seconds; blank uses repository default'
+        required: false
+        type: string
+        default: ''
+      server_start_timeout:
+        description: 'Server startup timeout in seconds; blank uses repository default'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: write
@@ -75,10 +85,10 @@ jobs:
       HF_HOME: ${{ vars.HF_HOME }}
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       BENCH_NUM_PROMPTS: '20'
-      # Fail stalled XPU model startup after 20 minutes.
+      # Manual dispatch input > repository variable > built-in default.
       # Keep engine registration timeout below the external readiness limit.
-      VLLM_ENGINE_READY_TIMEOUT_S: '900'
-      SERVER_START_TIMEOUT_SEC: '1200'
+      VLLM_ENGINE_READY_TIMEOUT_S: ${{ inputs.engine_ready_timeout || vars.VLLM_ENGINE_READY_TIMEOUT_S || '1800' }}
+      SERVER_START_TIMEOUT_SEC: ${{ inputs.server_start_timeout || vars.SERVER_START_TIMEOUT_SEC || '2400' }}
       VALIDATION_RUN_ID: run-${{ github.run_number }}-attempt-${{ github.run_attempt }}
 
     steps:
@@ -90,6 +100,16 @@ jobs:
           set -euo pipefail
           [[ "$HARDWARE" =~ ^[a-z][a-z0-9_]*$ ]] || { echo 'Invalid hardware identifier'; exit 2; }
           [[ -n "$RECIPE_TOOLS_REPO" && -n "$RECIPE_TOOLS_REF" ]] || { echo 'Recipe tools repo/ref required'; exit 2; }
+          for timeout in "$VLLM_ENGINE_READY_TIMEOUT_S" "$SERVER_START_TIMEOUT_SEC"; do
+            [[ "$timeout" =~ ^[1-9][0-9]{0,6}$ ]] || {
+              echo 'Startup timeouts must be positive integer seconds (up to seven digits)'; exit 2;
+            }
+          done
+          (( SERVER_START_TIMEOUT_SEC > VLLM_ENGINE_READY_TIMEOUT_S )) || {
+            echo 'Server startup timeout must exceed engine ready timeout'; exit 2;
+          }
+          echo "VLLM_ENGINE_READY_TIMEOUT_S=$VLLM_ENGINE_READY_TIMEOUT_S"
+          echo "SERVER_START_TIMEOUT_SEC=$SERVER_START_TIMEOUT_SEC"
           [[ -d /dev/dri ]] && compgen -G '/dev/dri/renderD*' >/dev/null || {
             echo 'No GPU render node detected under /dev/dri'; exit 2;
           }
